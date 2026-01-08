@@ -1249,7 +1249,11 @@ fn resolve_name_impl<'a>(
                 }
                 continue;
             }
+            let shadows_all = candidate.missing_submodule_is_terminal();
             next_candidates.push(candidate);
+            if shadows_all {
+                break;
+            }
         }
 
         // Now that we have several candidates, we need to reject candidates that are shadowed.
