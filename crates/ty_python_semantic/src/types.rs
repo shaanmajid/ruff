@@ -5763,11 +5763,41 @@ impl<'db> Type<'db> {
                         });
                     };
 
-                    Ok(
-                        typing_self(db, scope_id, typevar_binding_context, class.into())
-                            .map(Type::TypeVar)
-                            .unwrap_or(*self),
-                    )
+                    // Create the bound Self type variable.
+                    let bound_self =
+                        typing_self(db, scope_id, typevar_binding_context, class.into());
+
+                    // `Self` cannot be used in a static method.
+                    if let Some(definition) =
+                        bound_self.and_then(|bound| bound.binding_context(db).definition())
+                    {
+                        let is_staticmethod = infer::function_type_from_definition(db, definition)
+                            .is_some_and(|func| {
+                                func.has_known_decorator(db, FunctionDecorators::STATICMETHOD)
+                            });
+
+                        if is_staticmethod {
+                            return Err(InvalidTypeExpressionError {
+                                fallback_type: Type::unknown(),
+                                invalid_expressions: smallvec_inline![
+                                    InvalidTypeExpression::SelfInStaticMethod
+                                ],
+                            });
+                        }
+                    }
+
+                    // `Self` cannot be used in a metaclass (subclass of `type`).
+                    // We exclude `type` itself since it's defined in typeshed.
+                    if !class.is_known(db, KnownClass::Type) && class.is_metaclass(db) {
+                        return Err(InvalidTypeExpressionError {
+                            fallback_type: Type::unknown(),
+                            invalid_expressions: smallvec_inline![
+                                InvalidTypeExpression::SelfInMetaclass
+                            ],
+                        });
+                    }
+
+                    Ok(bound_self.map(Type::TypeVar).unwrap_or(*self))
                 }
                 // We ensure that `typing.TypeAlias` used in the expected position (annotating an
                 // annotated assignment statement) doesn't reach here. Using it in any other type
@@ -7634,6 +7664,10 @@ enum InvalidTypeExpression<'db> {
     /// Type qualifiers that are invalid in type expressions,
     /// and which would require exactly one argument even if they appeared in an annotation expression
     TypeQualifierRequiresOneArgument(SpecialFormType),
+    /// `typing.Self` cannot be used in a static method
+    SelfInStaticMethod,
+    /// `typing.Self` cannot be used in a metaclass
+    SelfInMetaclass,
     /// Some types are always invalid in type expressions
     InvalidType(Type<'db>, ScopeId<'db>),
 }
@@ -7702,6 +7736,12 @@ impl<'db> InvalidTypeExpression<'db> {
                         "Type qualifier `{qualifier}` is not allowed in type expressions \
                         (only in annotation expressions, and only with exactly one argument)",
                     ),
+                    InvalidTypeExpression::SelfInStaticMethod => {
+                        f.write_str("`Self` cannot be used in a static method")
+                    }
+                    InvalidTypeExpression::SelfInMetaclass => {
+                        f.write_str("`Self` cannot be used in a metaclass")
+                    }
                     InvalidTypeExpression::InvalidType(Type::FunctionLiteral(function), _) => {
                         write!(
                             f,
