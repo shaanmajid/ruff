@@ -63,7 +63,6 @@ fn equality_special_case<'db>(
     match (left, right) {
         (
             Type::Never
-            | Type::Dynamic(_)
             | Type::AlwaysFalsy
             | Type::AlwaysTruthy
             | Type::ProtocolInstance(_)
@@ -75,7 +74,6 @@ fn equality_special_case<'db>(
         | (
             _,
             Type::Never
-            | Type::Dynamic(_)
             | Type::AlwaysFalsy
             | Type::AlwaysTruthy
             | Type::ProtocolInstance(_)
@@ -83,6 +81,28 @@ fn equality_special_case<'db>(
             | Type::TypeGuard(_)
             | Type::TypeIs(_),
         ) => EqualityResult::Ambiguous,
+
+        // For Any compared to a literal type, we can narrow for != (exclude the literal)
+        // but not for == (Any could be anything).
+        (Type::Dynamic(_), other) | (other, Type::Dynamic(_)) => {
+            // Check if other is a literal type that we can narrow against
+            let is_literal = matches!(
+                other,
+                Type::IntLiteral(_)
+                    | Type::StringLiteral(_)
+                    | Type::BytesLiteral(_)
+                    | Type::BooleanLiteral(_)
+                    | Type::EnumLiteral(_)
+                    | Type::FunctionLiteral(_)
+            ) || other.is_singleton(db);
+
+            if is_literal && !is_positive {
+                // For != with a literal, narrow Any to exclude the literal
+                EqualityResult::CanNarrow(other.negate(db))
+            } else {
+                EqualityResult::Ambiguous
+            }
+        }
 
         (Type::TypeAlias(alias), other) | (other, Type::TypeAlias(alias)) => {
             equality_special_case(db, alias.value_type(db), other, is_positive)
@@ -113,10 +133,14 @@ fn equality_special_case<'db>(
             }
         }
 
-        (Type::Union(union), other) | (other, Type::Union(union)) => {
+        // Left is a union: narrow each element based on comparison with right.
+        (Type::Union(union), other) => {
             let mut all_always_equal = true;
             let mut all_always_unequal = true;
             let mut narrowed_union = UnionBuilder::new(db);
+            // Track elements to exclude (for the == case when AlwaysUnequal)
+            let mut excluded_intersection = IntersectionBuilder::new(db);
+            let mut has_excluded = false;
             for element in union.elements(db) {
                 match equality_special_case(db, *element, other, is_positive) {
                     EqualityResult::AlwaysEqual => {
@@ -139,6 +163,10 @@ fn equality_special_case<'db>(
                         all_always_equal = false;
                         if !is_positive {
                             narrowed_union = narrowed_union.add(*element);
+                        } else {
+                            // For == case, track the excluded element
+                            excluded_intersection = excluded_intersection.add_negative(*element);
+                            has_excluded = true;
                         }
                     }
                 }
@@ -147,9 +175,33 @@ fn equality_special_case<'db>(
                 EqualityResult::AlwaysEqual
             } else if all_always_unequal {
                 EqualityResult::AlwaysUnequal
+            } else if has_excluded {
+                // Build the intersection of the union with the exclusions
+                excluded_intersection =
+                    excluded_intersection.add_positive(narrowed_union.build());
+                EqualityResult::CanNarrow(excluded_intersection.build())
             } else {
                 EqualityResult::CanNarrow(narrowed_union.build())
             }
+        }
+
+        // Right is a union: we can only narrow if all elements of the union give
+        // the same result. Otherwise, we don't know which value of the union is
+        // being compared against, so we can't narrow.
+        (other, Type::Union(union)) => {
+            let elements = union.elements(db);
+            if elements.is_empty() {
+                return EqualityResult::Ambiguous;
+            }
+            let first_result = equality_special_case(db, other, elements[0], is_positive);
+            for element in elements.iter().skip(1) {
+                let result = equality_special_case(db, other, *element, is_positive);
+                if result != first_result {
+                    // Different elements give different results, can't narrow
+                    return EqualityResult::Ambiguous;
+                }
+            }
+            first_result
         }
 
         (Type::Intersection(intersection), other) | (other, Type::Intersection(intersection)) => {
@@ -701,32 +753,63 @@ fn equality_special_case<'db>(
         | (Type::TypedDict(_), Type::NominalInstance(_)) => EqualityResult::Ambiguous,
 
         (Type::NominalInstance(l), Type::NominalInstance(r)) => {
-            if left.is_singleton(db)
-                && KnownEqualitySemantics::for_final_instance(db, left).is_some()
-            {
-                return if r.class(db).is_final(db)
-                    && KnownEqualitySemantics::for_final_instance(db, right).is_some()
-                {
-                    EqualityResult::from(l == r)
-                } else if !is_positive {
-                    EqualityResult::CanNarrow(left.negate(db))
-                } else {
-                    EqualityResult::Ambiguous
-                };
+            if left.is_singleton(db) {
+                if let Some(left_semantics) = KnownEqualitySemantics::for_final_instance(db, left) {
+                    // Check if right also has known semantics - if they differ or both are Object
+                    // with different classes, they're always unequal. But we can only conclude
+                    // AlwaysUnequal if the non-singleton side is also final (otherwise subclasses
+                    // could have custom __eq__/__ne__ methods).
+                    if let Some(right_semantics) =
+                        KnownEqualitySemantics::for_final_instance(db, right)
+                    {
+                        let different_classes =
+                            l.class(db).class_literal(db) != r.class(db).class_literal(db);
+                        let different_semantics = left_semantics != right_semantics
+                            || left_semantics == KnownEqualitySemantics::Object;
+
+                        if r.class(db).is_final(db) {
+                            if different_semantics && different_classes {
+                                return EqualityResult::AlwaysUnequal;
+                            }
+                            return EqualityResult::from(l == r);
+                        }
+                    }
+                    // Right doesn't have known semantics or isn't final, but we know
+                    // left is a singleton. For !=, we can narrow by excluding left.
+                    // However, we can only do this if right is single-valued too.
+                    // Since right is not final and may not be single-valued, return Ambiguous.
+                    return EqualityResult::Ambiguous;
+                }
             }
 
-            if right.is_singleton(db)
-                && KnownEqualitySemantics::for_final_instance(db, right).is_some()
-            {
-                return if l.class(db).is_final(db)
-                    && KnownEqualitySemantics::for_final_instance(db, left).is_some()
+            if right.is_singleton(db) {
+                if let Some(right_semantics) = KnownEqualitySemantics::for_final_instance(db, right)
                 {
-                    EqualityResult::from(l == r)
-                } else if !is_positive {
-                    EqualityResult::CanNarrow(right.negate(db))
-                } else {
-                    EqualityResult::Ambiguous
-                };
+                    // Check if left also has known semantics - if they differ or both are Object
+                    // with different classes, they're always unequal. But we can only conclude
+                    // AlwaysUnequal if the non-singleton side is also final (otherwise subclasses
+                    // could have custom __eq__/__ne__ methods).
+                    if let Some(left_semantics) =
+                        KnownEqualitySemantics::for_final_instance(db, left)
+                    {
+                        let different_classes =
+                            l.class(db).class_literal(db) != r.class(db).class_literal(db);
+                        let different_semantics = left_semantics != right_semantics
+                            || right_semantics == KnownEqualitySemantics::Object;
+
+                        if l.class(db).is_final(db) {
+                            if different_semantics && different_classes {
+                                return EqualityResult::AlwaysUnequal;
+                            }
+                            return EqualityResult::from(l == r);
+                        }
+                    }
+                    // Left doesn't have known semantics or isn't final, but we know
+                    // right is a singleton. For !=, we can narrow by excluding right.
+                    // However, we can only do this if left is single-valued too.
+                    // Since left is not final and may not be single-valued, return Ambiguous.
+                    return EqualityResult::Ambiguous;
+                }
             }
 
             let left_class = l.class(db);
