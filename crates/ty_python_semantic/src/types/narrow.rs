@@ -725,8 +725,19 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
     ) -> Option<Type<'db>> {
         match evaluate_type_equality(self.db, lhs_ty, rhs_ty, is_positive) {
             EqualityResult::CanNarrow(narrowed) => Some(narrowed),
-            EqualityResult::AlwaysEqual | EqualityResult::Ambiguous => None,
-            EqualityResult::AlwaysUnequal => Some(Type::Never),
+            EqualityResult::AlwaysEqual => {
+                // Types always compare equal:
+                // - For equality check: condition always true, no narrowing needed
+                // - For inequality check: condition always false, narrow to Never
+                if is_positive { None } else { Some(Type::Never) }
+            }
+            EqualityResult::Ambiguous => None,
+            EqualityResult::AlwaysUnequal => {
+                // Types always compare unequal:
+                // - For equality check: condition always false, narrow to Never
+                // - For inequality check: condition always true, no narrowing needed
+                if is_positive { Some(Type::Never) } else { None }
+            }
         }
     }
 

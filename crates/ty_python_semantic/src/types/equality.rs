@@ -108,22 +108,43 @@ fn equality_special_case<'db>(
             let mut narrowed_union = UnionBuilder::new(db);
             for element in union.elements(db) {
                 match equality_special_case(db, *element, other, is_positive) {
-                    EqualityResult::AlwaysEqual | EqualityResult::Ambiguous => {
+                    EqualityResult::AlwaysEqual => {
+                        // For equality (is_positive=true): elements that always compare equal
+                        // satisfy the `==` check, so keep them.
+                        // For inequality (is_positive=false): elements that always compare equal
+                        // never satisfy the `!=` check, so skip them.
+                        if is_positive {
+                            narrowed_union = narrowed_union.add(*element);
+                        }
+                    }
+                    EqualityResult::Ambiguous => {
+                        // Ambiguous elements could satisfy either `==` or `!=`, so keep them.
                         narrowed_union = narrowed_union.add(*element);
                     }
                     EqualityResult::CanNarrow(narrowed_element) => {
                         narrowed_union = narrowed_union.add(narrowed_element);
                     }
-                    EqualityResult::AlwaysUnequal => {}
+                    EqualityResult::AlwaysUnequal => {
+                        // For equality (is_positive=true): elements that always compare unequal
+                        // never satisfy the `==` check, so skip them.
+                        // For inequality (is_positive=false): elements that always compare unequal
+                        // always satisfy the `!=` check, so keep them.
+                        if !is_positive {
+                            narrowed_union = narrowed_union.add(*element);
+                        }
+                    }
                 }
             }
             EqualityResult::CanNarrow(narrowed_union.build())
         }
 
         (Type::Intersection(intersection), other) | (other, Type::Intersection(intersection)) => {
+            // Negative elements represent values EXCLUDED from the intersection.
+            // If any negative element is AlwaysEqual to `other`, the intersection
+            // excludes `other`, so the intersection can never equal `other`.
             if intersection.negative(db).iter().any(|element| {
                 equality_special_case(db, *element, other, is_positive)
-                    == EqualityResult::AlwaysUnequal
+                    == EqualityResult::AlwaysEqual
             }) {
                 return EqualityResult::AlwaysUnequal;
             }
@@ -133,9 +154,14 @@ fn equality_special_case<'db>(
                     EqualityResult::CanNarrow(_)
                 )
             }) {
+                // For equality (is_positive=true): narrow to intersection & other
+                // For inequality (is_positive=false): narrow to intersection & ~other
                 EqualityResult::CanNarrow(IntersectionType::from_elements(
                     db,
-                    [Type::Intersection(intersection), other],
+                    [
+                        Type::Intersection(intersection),
+                        other.negate_if(db, !is_positive),
+                    ],
                 ))
             } else {
                 EqualityResult::Ambiguous
@@ -508,7 +534,27 @@ fn equality_special_case<'db>(
         (Type::NominalInstance(instance), Type::IntLiteral(i))
         | (Type::IntLiteral(i), Type::NominalInstance(instance)) => {
             let class = instance.class(db).class_literal(db);
-            if let Some(enum_metadata) = enum_metadata(db, class) {
+            // Special handling for `bool` which has exactly two values: True (1) and False (0)
+            if class.is_known(db, KnownClass::Bool) {
+                match i {
+                    0 => {
+                        // bool == 0 can only be True for False
+                        EqualityResult::CanNarrow(
+                            Type::BooleanLiteral(false).negate_if(db, !is_positive),
+                        )
+                    }
+                    1 => {
+                        // bool == 1 can only be True for True
+                        EqualityResult::CanNarrow(
+                            Type::BooleanLiteral(true).negate_if(db, !is_positive),
+                        )
+                    }
+                    _ => {
+                        // bool can never equal any other integer
+                        EqualityResult::AlwaysUnequal
+                    }
+                }
+            } else if let Some(enum_metadata) = enum_metadata(db, class) {
                 match KnownEqualitySemantics::for_final_instance(
                     db,
                     Type::NominalInstance(instance),
@@ -539,9 +585,9 @@ fn equality_special_case<'db>(
                     Type::NominalInstance(instance),
                 ) {
                     Some(KnownEqualitySemantics::Int) | None => EqualityResult::Ambiguous,
-                    Some(_) => {
-                        EqualityResult::CanNarrow(Type::IntLiteral(i).negate_if(db, !is_positive))
-                    }
+                    // For final types with non-Int equality semantics (like NoneType),
+                    // comparing with an int literal is always unequal.
+                    Some(_) => EqualityResult::AlwaysUnequal,
                 }
             } else if !is_positive {
                 EqualityResult::CanNarrow(Type::IntLiteral(i).negate(db))
