@@ -1,6 +1,7 @@
 use ruff_python_ast::name::Name;
 
-use super::{Truthiness, Type};
+use super::enums::enum_member_literals;
+use super::{Truthiness, Type, UnionType};
 use crate::{
     Db,
     place::PlaceAndQualifiers,
@@ -103,38 +104,101 @@ fn equality_special_case<'db>(
         }
 
         (Type::Union(union), other) | (other, Type::Union(union)) => {
+            // Check if the union is on the left (being narrowed) or right (compared against)
+            let union_is_left = matches!(left, Type::Union(_));
+
             let mut narrowed_union = UnionBuilder::new(db);
+            let mut has_ambiguous = false;
+            let mut has_always_unequal = false;
+            let mut always_equal_union = UnionBuilder::new(db);
+
             for element in union.elements(db) {
                 match equality_special_case(db, *element, other) {
-                    EqualityResult::AlwaysEqual
-                    | EqualityResult::Ambiguous
-                    | EqualityResult::InequalityIndicatesNegativeNarrowability(_) => {
+                    EqualityResult::AlwaysEqual => {
                         narrowed_union = narrowed_union.add(*element);
+                        always_equal_union = always_equal_union.add(*element);
+                    }
+                    EqualityResult::Ambiguous => {
+                        has_ambiguous = true;
+                        narrowed_union = narrowed_union.add(*element);
+                    }
+                    EqualityResult::InequalityIndicatesNegativeNarrowability(inner) => {
+                        // The inner type is what could be equal (for == narrowing)
+                        // but not always equal (so we don't add to always_equal_union)
+                        has_ambiguous = true;
+                        narrowed_union = narrowed_union.add(inner);
                     }
                     EqualityResult::EqualityIndicatesPositiveNarrowability(narrowed_element) => {
                         narrowed_union = narrowed_union.add(narrowed_element);
+                        always_equal_union = always_equal_union.add(narrowed_element);
                     }
-                    EqualityResult::AlwaysUnequal => {}
+                    EqualityResult::AlwaysUnequal => {
+                        has_always_unequal = true;
+                    }
                 }
             }
-            EqualityResult::EqualityIndicatesPositiveNarrowability(narrowed_union.build())
+
+            let narrowed = narrowed_union.build();
+
+            // If the narrowed union is empty (Never), it means nothing could compare equal
+            if narrowed.is_never() {
+                return EqualityResult::AlwaysUnequal;
+            }
+
+            // When the union is on the LEFT (being narrowed), we can use the narrowed union
+            // for both == and != narrowing.
+            // When the union is on the RIGHT (being compared against), and we have a mix of
+            // AlwaysEqual and AlwaysUnequal elements, the comparison result depends on which
+            // union element is present at runtime. In this case, we should only use the
+            // always_equal elements for != narrowing (to be conservative).
+            let needs_careful_handling = has_ambiguous
+                || (!union_is_left && has_always_unequal && !narrowed.is_never());
+
+            if needs_careful_handling {
+                let always_equal = always_equal_union.build();
+                if always_equal.is_never() {
+                    EqualityResult::Ambiguous
+                } else {
+                    EqualityResult::InequalityIndicatesNegativeNarrowability(always_equal)
+                }
+            } else {
+                EqualityResult::EqualityIndicatesPositiveNarrowability(narrowed)
+            }
         }
 
         (Type::Intersection(intersection), other) | (other, Type::Intersection(intersection)) => {
+            // If we exclude a type that is always equal to other, then the intersection
+            // can never equal other. For example: `int & ~Literal[1]` vs `Literal[1]`
+            // Since we exclude Literal[1], and Literal[1] == Literal[1] is AlwaysEqual,
+            // the intersection can never equal Literal[1].
             if intersection.negative(db).iter().any(|element| {
-                equality_special_case(db, *element, other) == EqualityResult::AlwaysUnequal
+                equality_special_case(db, *element, other) == EqualityResult::AlwaysEqual
             }) {
                 return EqualityResult::AlwaysUnequal;
             }
-            if intersection.positive(db).iter().any(|element| {
-                matches!(
-                    equality_special_case(db, *element, other),
-                    EqualityResult::EqualityIndicatesPositiveNarrowability(_)
-                )
-            }) {
+
+            // Check positive elements for narrowability
+            let mut has_positive_narrowability = false;
+            let mut negative_narrowability_type: Option<Type<'db>> = None;
+
+            for element in intersection.positive(db) {
+                match equality_special_case(db, *element, other) {
+                    EqualityResult::EqualityIndicatesPositiveNarrowability(_) => {
+                        has_positive_narrowability = true;
+                    }
+                    EqualityResult::InequalityIndicatesNegativeNarrowability(ty) => {
+                        negative_narrowability_type = Some(ty);
+                    }
+                    _ => {}
+                }
+            }
+
+            if has_positive_narrowability {
                 EqualityResult::EqualityIndicatesPositiveNarrowability(
                     IntersectionType::from_elements(db, [Type::Intersection(intersection), other]),
                 )
+            } else if let Some(ty) = negative_narrowability_type {
+                EqualityResult::InequalityIndicatesNegativeNarrowability(ty)
             } else {
                 EqualityResult::Ambiguous
             }
@@ -170,7 +234,10 @@ fn equality_special_case<'db>(
                 return EqualityResult::Ambiguous;
             };
             if left_equality_semantics == right_equality_semantics {
-                if left_equality_semantics == KnownEqualitySemantics::Object {
+                if matches!(
+                    left_equality_semantics,
+                    KnownEqualitySemantics::Object | KnownEqualitySemantics::Enum
+                ) {
                     EqualityResult::from(l == r)
                 } else {
                     EqualityResult::from(l.value(db) == r.value(db))
@@ -189,7 +256,8 @@ fn equality_special_case<'db>(
                 Some(
                     KnownEqualitySemantics::Bytes
                     | KnownEqualitySemantics::Object
-                    | KnownEqualitySemantics::Str,
+                    | KnownEqualitySemantics::Str
+                    | KnownEqualitySemantics::Enum,
                 ) => EqualityResult::AlwaysUnequal,
                 None => EqualityResult::Ambiguous,
             }
@@ -204,7 +272,8 @@ fn equality_special_case<'db>(
                 Some(
                     KnownEqualitySemantics::Int
                     | KnownEqualitySemantics::Object
-                    | KnownEqualitySemantics::Str,
+                    | KnownEqualitySemantics::Str
+                    | KnownEqualitySemantics::Enum,
                 ) => EqualityResult::AlwaysUnequal,
                 None => EqualityResult::Ambiguous,
             }
@@ -219,7 +288,8 @@ fn equality_special_case<'db>(
                 Some(
                     KnownEqualitySemantics::Bytes
                     | KnownEqualitySemantics::Int
-                    | KnownEqualitySemantics::Object,
+                    | KnownEqualitySemantics::Object
+                    | KnownEqualitySemantics::Enum,
                 ) => EqualityResult::AlwaysUnequal,
                 None => EqualityResult::Ambiguous,
             }
@@ -240,7 +310,8 @@ fn equality_special_case<'db>(
                 Some(
                     KnownEqualitySemantics::Bytes
                     | KnownEqualitySemantics::Int
-                    | KnownEqualitySemantics::Object,
+                    | KnownEqualitySemantics::Object
+                    | KnownEqualitySemantics::Enum,
                 ) => EqualityResult::AlwaysUnequal,
                 None => EqualityResult::Ambiguous,
             }
@@ -505,6 +576,7 @@ fn equality_special_case<'db>(
 
         (Type::NominalInstance(instance), Type::EnumLiteral(e))
         | (Type::EnumLiteral(e), Type::NominalInstance(instance)) => {
+            // Handle bool vs IntEnum
             if instance.has_known_class(db, KnownClass::Bool)
                 && KnownEqualitySemantics::for_final_instance(db, Type::EnumLiteral(e))
                     == Some(KnownEqualitySemantics::Int)
@@ -520,6 +592,73 @@ fn equality_special_case<'db>(
                 };
             }
 
+            // Check if this is a NominalInstance of an enum class being compared to one of its literals
+            let enum_class_literal = instance.class_literal(db);
+            let enum_literal_class = e.enum_class(db);
+            if enum_class_literal == enum_literal_class {
+                // Same enum class - check if it has well-behaved equality
+                let enum_instance = e.enum_class_instance(db);
+                match KnownEqualitySemantics::for_final_instance(db, enum_instance) {
+                    Some(KnownEqualitySemantics::Enum | KnownEqualitySemantics::Object) => {
+                        // Standard enum equality - expand to member literals
+                        if let Some(member_literals) =
+                            enum_member_literals(db, enum_class_literal, None)
+                        {
+                            let narrowed = UnionType::from_elements(
+                                db,
+                                member_literals.filter(|member_ty| {
+                                    // Keep members that could compare equal to e
+                                    !matches!(
+                                        equality_special_case(db, *member_ty, Type::EnumLiteral(e)),
+                                        EqualityResult::AlwaysUnequal
+                                    )
+                                }),
+                            );
+                            return EqualityResult::EqualityIndicatesPositiveNarrowability(narrowed);
+                        }
+                    }
+                    Some(KnownEqualitySemantics::Int) => {
+                        // IntEnum - expand to member literals and compare by value
+                        if let Some(member_literals) =
+                            enum_member_literals(db, enum_class_literal, None)
+                        {
+                            let narrowed = UnionType::from_elements(
+                                db,
+                                member_literals.filter(|member_ty| {
+                                    !matches!(
+                                        equality_special_case(db, *member_ty, Type::EnumLiteral(e)),
+                                        EqualityResult::AlwaysUnequal
+                                    )
+                                }),
+                            );
+                            return EqualityResult::EqualityIndicatesPositiveNarrowability(narrowed);
+                        }
+                    }
+                    Some(KnownEqualitySemantics::Str | KnownEqualitySemantics::Bytes) => {
+                        // StrEnum or BytesEnum - expand to member literals and compare by value
+                        if let Some(member_literals) =
+                            enum_member_literals(db, enum_class_literal, None)
+                        {
+                            let narrowed = UnionType::from_elements(
+                                db,
+                                member_literals.filter(|member_ty| {
+                                    !matches!(
+                                        equality_special_case(db, *member_ty, Type::EnumLiteral(e)),
+                                        EqualityResult::AlwaysUnequal
+                                    )
+                                }),
+                            );
+                            return EqualityResult::EqualityIndicatesPositiveNarrowability(narrowed);
+                        }
+                    }
+                    None => {
+                        // Custom equality - can't narrow
+                        return EqualityResult::Ambiguous;
+                    }
+                }
+            }
+
+            // Different classes or couldn't get member literals - fall back to comparing instances
             equality_special_case(
                 db,
                 Type::NominalInstance(instance),
@@ -592,6 +731,8 @@ enum KnownEqualitySemantics {
     Int,
     Str,
     Bytes,
+    /// Standard enum equality (identity-based, like object)
+    Enum,
 }
 
 impl KnownEqualitySemantics {
@@ -613,6 +754,11 @@ impl KnownEqualitySemantics {
         let bytes_class = KnownClass::Bytes.to_class_literal(db);
         if eq == lookup_dunder_eq(db, bytes_class) && ne == lookup_dunder_ne(db, bytes_class) {
             return Some(KnownEqualitySemantics::Bytes);
+        }
+        // Check for standard enum equality (identity-based)
+        let enum_class = KnownClass::Enum.to_class_literal(db);
+        if eq == lookup_dunder_eq(db, enum_class) && ne == lookup_dunder_ne(db, enum_class) {
+            return Some(KnownEqualitySemantics::Enum);
         }
         None
     }
