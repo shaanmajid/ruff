@@ -725,19 +725,24 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
     ) -> Option<Type<'db>> {
         match evaluate_type_equality(self.db, lhs_ty, rhs_ty, is_positive) {
             EqualityResult::CanNarrow(narrowed) => Some(narrowed),
-            EqualityResult::Ambiguous => None,
+            // For Ambiguous: we can't narrow precisely, return original type.
+            EqualityResult::Ambiguous => Some(lhs_ty),
             EqualityResult::AlwaysEqual => {
                 if is_positive {
-                    None
+                    // x == y is always true, no narrowing possible
+                    Some(lhs_ty)
                 } else {
+                    // x != y is always false (since x == y), this branch is unreachable
                     Some(Type::Never)
                 }
             }
             EqualityResult::AlwaysUnequal => {
                 if is_positive {
+                    // x == y is always false, this branch is unreachable
                     Some(Type::Never)
                 } else {
-                    None
+                    // x != y is always true, no narrowing possible
+                    Some(lhs_ty)
                 }
             }
         }

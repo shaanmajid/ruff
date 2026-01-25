@@ -113,30 +113,73 @@ fn equality_special_case<'db>(
             }
         }
 
-        (Type::Union(union), other) | (other, Type::Union(union)) => {
+        // Case 1: The narrowing target (left) is a union
+        (Type::Union(union), other) => {
+            let mut all_always_equal = true;
+            let mut all_always_unequal = true;
             let mut narrowed_union = UnionBuilder::new(db);
             for element in union.elements(db) {
                 match equality_special_case(db, *element, other, is_positive) {
                     EqualityResult::AlwaysEqual => {
+                        all_always_unequal = false;
                         if is_positive {
                             narrowed_union = narrowed_union.add(*element);
                         }
                     }
                     EqualityResult::Ambiguous => {
+                        all_always_equal = false;
+                        all_always_unequal = false;
                         narrowed_union = narrowed_union.add(*element);
                     }
                     EqualityResult::CanNarrow(narrowed_element) => {
-                        narrowed_union =
-                            narrowed_union.add(narrowed_element.negate_if(db, !is_positive));
+                        all_always_equal = false;
+                        all_always_unequal = false;
+                        narrowed_union = narrowed_union.add(narrowed_element);
                     }
                     EqualityResult::AlwaysUnequal => {
+                        all_always_equal = false;
                         if !is_positive {
                             narrowed_union = narrowed_union.add(*element);
                         }
                     }
                 }
             }
-            EqualityResult::CanNarrow(narrowed_union.build())
+            if all_always_equal {
+                EqualityResult::AlwaysEqual
+            } else if all_always_unequal {
+                EqualityResult::AlwaysUnequal
+            } else {
+                EqualityResult::CanNarrow(narrowed_union.build())
+            }
+        }
+
+        // Case 2: The comparison value (right) is a union
+        (other, Type::Union(union)) => {
+            let mut all_always_equal = true;
+            let mut all_always_unequal = true;
+            for element in union.elements(db) {
+                match equality_special_case(db, other, *element, is_positive) {
+                    EqualityResult::AlwaysEqual => {
+                        all_always_unequal = false;
+                    }
+                    EqualityResult::AlwaysUnequal => {
+                        all_always_equal = false;
+                    }
+                    EqualityResult::Ambiguous | EqualityResult::CanNarrow(_) => {
+                        all_always_equal = false;
+                        all_always_unequal = false;
+                    }
+                }
+            }
+            if all_always_equal {
+                EqualityResult::AlwaysEqual
+            } else if all_always_unequal {
+                EqualityResult::AlwaysUnequal
+            } else {
+                // The comparison value is a union and the result is ambiguous -
+                // we can't narrow the target type
+                EqualityResult::Ambiguous
+            }
         }
 
         (Type::Intersection(intersection), other) | (other, Type::Intersection(intersection)) => {
@@ -695,6 +738,9 @@ fn equality_special_case<'db>(
                     && KnownEqualitySemantics::for_final_instance(db, right).is_some()
                 {
                     EqualityResult::from(l == r)
+                } else if left.is_disjoint_from(db, right) {
+                    // If left (singleton) is disjoint from right, they can never be equal
+                    EqualityResult::AlwaysUnequal
                 } else if !is_positive {
                     EqualityResult::CanNarrow(left.negate(db))
                 } else {
