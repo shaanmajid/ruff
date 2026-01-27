@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt::Write;
+use std::ops::Deref;
 use std::sync::{LazyLock, Mutex};
 
 use super::{
@@ -71,7 +72,7 @@ use crate::{
 };
 use indexmap::IndexSet;
 use itertools::{Either, Itertools as _};
-use ruff_db::diagnostic::Span;
+use ruff_db::diagnostic::{Annotation, Span, SubDiagnostic, SubDiagnosticSeverity};
 use ruff_db::files::File;
 use ruff_db::parsed::{ParsedModuleRef, parsed_module};
 use ruff_python_ast::name::Name;
@@ -1024,7 +1025,7 @@ impl<'db> ClassType<'db> {
     ///
     /// The value of the map is a struct containing information about the abstract method.
     #[salsa::tracked(heap_size=ruff_memory_usage::heap_size)]
-    pub(crate) fn abstract_methods(self, db: &'db dyn Db) -> FxIndexMap<Name, AbstractMethod<'db>> {
+    pub(crate) fn abstract_methods(self, db: &'db dyn Db) -> AbstractMethods<'db> {
         fn function_as_abstract_method<'db>(
             db: &'db dyn Db,
             function: FunctionType<'db>,
@@ -1142,7 +1143,7 @@ impl<'db> ClassType<'db> {
             }
         }
 
-        abstract_methods
+        AbstractMethods(abstract_methods)
     }
 
     /// Returns `true` if any class in this class's MRO (excluding `object`) defines an ordering
@@ -2077,6 +2078,48 @@ pub(super) struct AbstractMethod<'db> {
     pub(super) defining_class: ClassType<'db>,
     pub(super) definition: Definition<'db>,
     pub(super) explicitly_abstract: bool,
+}
+
+impl<'db> AbstractMethod<'db> {
+    pub(super) fn explanatory_subdiagnostic(
+        &self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<SubDiagnostic> {
+        if self.explicitly_abstract {
+            return None;
+        }
+        let defining_class_name = self.defining_class.name(db);
+        let mut sub = SubDiagnostic::new(
+            SubDiagnosticSeverity::Info,
+            format_args!(
+                "`{defining_class_name}.{name}` is implicitly abstract \
+                because `{defining_class_name}` is a `Protocol` class \
+                and `{name}` lacks an implementation",
+            ),
+        );
+        sub.annotate(
+            Annotation::secondary(self.defining_class.definition_span(db))
+                .message(format_args!("`{defining_class_name}` declared here")),
+        );
+        Some(sub)
+    }
+
+    pub(super) fn span(&self, db: &'db dyn Db) -> Span {
+        let module = parsed_module(db, self.definition.file(db)).load(db);
+        Span::from(self.definition.focus_range(db, &module))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::Update)]
+pub(super) struct AbstractMethods<'db>(FxIndexMap<Name, AbstractMethod<'db>>);
+
+impl<'db> Deref for AbstractMethods<'db> {
+    type Target = FxIndexMap<Name, AbstractMethod<'db>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 /// A filter that describes which methods are considered when looking for implicit attribute assignments

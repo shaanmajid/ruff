@@ -1,0 +1,151 @@
+---
+source: crates/ty_test/src/lib.rs
+expression: snapshot
+---
+
+---
+mdtest name: abstract.md - Tests regarding abstract classes - Instantiation is forbidden
+mdtest path: crates/ty_python_semantic/resources/mdtest/abstract.md
+---
+
+# Python source files
+
+## mdtest_snippet.py
+
+```
+ 1 | import abc
+ 2 | from typing import Protocol
+ 3 | 
+ 4 | class Foo(abc.ABC):
+ 5 |     @abc.abstractmethod
+ 6 |     def bar(self): ...
+ 7 | 
+ 8 | class Spam(Foo): ...
+ 9 | 
+10 | # error: [call-non-callable] "Cannot instantiate `Spam` with unimplemented abstract method `bar`"
+11 | Spam()
+12 | 
+13 | class Foo2(abc.ABC):
+14 |     @abc.abstractmethod
+15 |     def bar(self): ...
+16 |     @abc.abstractmethod
+17 |     def bar2(self): ...
+18 | 
+19 | # error: [call-non-callable] "Cannot instantiate `Foo2` with unimplemented abstract methods `bar` and `bar2`"
+20 | Foo2()
+21 | 
+22 | class Spam2(Foo2): ...
+23 | 
+24 | # error: [call-non-callable]
+25 | Spam2()
+26 | 
+27 | class Foo3(Protocol):
+28 |     def bar(self) -> int: ...
+29 | 
+30 | class Spam3(Foo3): ...
+31 | 
+32 | # error: [call-non-callable]
+33 | Spam3()
+```
+
+# Diagnostics
+
+```
+error[call-non-callable]: Cannot instantiate abstract class `Spam`
+  --> src/mdtest_snippet.py:11:1
+   |
+10 | # error: [call-non-callable] "Cannot instantiate `Spam` with unimplemented abstract method `bar`"
+11 | Spam()
+   | ^^^^^^ Abstract method `bar` is unimplemented on `Spam`
+12 |
+13 | class Foo2(abc.ABC):
+   |
+  ::: src/mdtest_snippet.py:6:9
+   |
+ 4 | class Foo(abc.ABC):
+ 5 |     @abc.abstractmethod
+ 6 |     def bar(self): ...
+   |         --- `bar` declared as abstract on superclass `Foo`
+ 7 |
+ 8 | class Spam(Foo): ...
+   |
+info: rule `call-non-callable` is enabled by default
+
+```
+
+```
+error[call-non-callable]: Cannot instantiate abstract class `Foo2`
+  --> src/mdtest_snippet.py:20:1
+   |
+19 | # error: [call-non-callable] "Cannot instantiate `Foo2` with unimplemented abstract methods `bar` and `bar2`"
+20 | Foo2()
+   | ^^^^^^ `Foo2` has unimplemented abstract methods
+21 |
+22 | class Spam2(Foo2): ...
+   |
+info: Abstract methods `bar` and `bar2` are unimplemented
+  --> src/mdtest_snippet.py:15:9
+   |
+13 | class Foo2(abc.ABC):
+14 |     @abc.abstractmethod
+15 |     def bar(self): ...
+   |         --- `bar` declared as abstract
+16 |     @abc.abstractmethod
+17 |     def bar2(self): ...
+   |
+info: rule `call-non-callable` is enabled by default
+
+```
+
+```
+error[call-non-callable]: Cannot instantiate abstract class `Spam2`
+  --> src/mdtest_snippet.py:25:1
+   |
+24 | # error: [call-non-callable]
+25 | Spam2()
+   | ^^^^^^^ `Spam2` has unimplemented abstract methods
+26 |
+27 | class Foo3(Protocol):
+   |
+info: Abstract methods `bar` and `bar2` are unimplemented
+  --> src/mdtest_snippet.py:15:9
+   |
+13 | class Foo2(abc.ABC):
+14 |     @abc.abstractmethod
+15 |     def bar(self): ...
+   |         --- `bar` declared as abstract on superclass `Foo2`
+16 |     @abc.abstractmethod
+17 |     def bar2(self): ...
+   |
+info: rule `call-non-callable` is enabled by default
+
+```
+
+```
+error[call-non-callable]: Cannot instantiate abstract class `Spam3`
+  --> src/mdtest_snippet.py:33:1
+   |
+32 | # error: [call-non-callable]
+33 | Spam3()
+   | ^^^^^^^ Abstract method `bar` is unimplemented on `Spam3`
+   |
+  ::: src/mdtest_snippet.py:28:9
+   |
+27 | class Foo3(Protocol):
+28 |     def bar(self) -> int: ...
+   |         --- `bar` declared as abstract on superclass `Foo3`
+29 |
+30 | class Spam3(Foo3): ...
+   |
+info: `Foo3.bar` is implicitly abstract because `Foo3` is a `Protocol` class and `bar` lacks an implementation
+  --> src/mdtest_snippet.py:27:7
+   |
+25 | Spam2()
+26 |
+27 | class Foo3(Protocol):
+   |       -------------- `Foo3` declared here
+28 |     def bar(self) -> int: ...
+   |
+info: rule `call-non-callable` is enabled by default
+
+```
