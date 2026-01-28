@@ -1121,6 +1121,11 @@ impl<'db> ClassType<'db> {
                     .retain(|name, _| class.own_class_member(db, None, name).is_undefined());
                 continue;
             };
+            abstract_methods.retain(|name, _| {
+                class_literal
+                    .own_synthesized_member(db, None, None, name)
+                    .is_none()
+            });
             let scope = class_literal.body_scope(db);
             let place_table = place_table(db, scope);
             for (symbol_id, bindings_iterator) in

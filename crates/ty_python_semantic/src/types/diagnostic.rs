@@ -3834,9 +3834,8 @@ pub(crate) fn report_attempted_instantiation_of_abstract_class<'db>(
     if let Some((name, method)) = abstract_methods.first() {
         let secondary_annotation = Annotation::secondary(method.span(db));
         if abstract_methods.len() == 1 {
-            diagnostic.set_primary_message(format_args!(
-                "Abstract method `{name}` is unimplemented on `{class_name}`",
-            ));
+            diagnostic
+                .set_primary_message(format_args!("Abstract method `{name}` is unimplemented",));
             diagnostic.set_concise_message(format_args!(
                 "Cannot instantiate `{class_name}` with unimplemented abstract method `{name}`"
             ));
