@@ -1024,7 +1024,11 @@ impl<'db> ClassType<'db> {
     /// and have not been overridden with a concrete implementation anywhere in the MRO
     ///
     /// The value of the map is a struct containing information about the abstract method.
-    #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size)]
+    #[salsa::tracked(
+        returns(ref),
+        heap_size=ruff_memory_usage::heap_size,
+        cycle_initial=|_, _, _| AbstractMethods::default()
+    )]
     pub(crate) fn abstract_methods(self, db: &'db dyn Db) -> AbstractMethods<'db> {
         fn function_as_abstract_method<'db>(
             db: &'db dyn Db,
@@ -2116,7 +2120,7 @@ impl<'db> AbstractMethod<'db> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::Update, Default)]
 pub(super) struct AbstractMethods<'db>(FxIndexMap<Name, AbstractMethod<'db>>);
 
 impl<'db> Deref for AbstractMethods<'db> {
