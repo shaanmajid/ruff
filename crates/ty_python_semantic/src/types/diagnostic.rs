@@ -3831,7 +3831,8 @@ pub(crate) fn report_attempted_instantiation_of_abstract_class<'db>(
         "Cannot instantiate abstract class `{class_name}`"
     ));
 
-    if let Some((name, method)) = abstract_methods.first() {
+    if let Some(method) = abstract_methods.first(db) {
+        let name = method.name;
         let secondary_annotation = Annotation::secondary(method.span(db));
         if abstract_methods.len() == 1 {
             diagnostic
@@ -3858,7 +3859,7 @@ pub(crate) fn report_attempted_instantiation_of_abstract_class<'db>(
             let num_abstract_methods = abstract_methods.len();
             let max_abstract_methods_to_print = if verbose { num_abstract_methods } else { 3 };
             let formatted_methods =
-                format_enumeration(abstract_methods.keys().take(max_abstract_methods_to_print));
+                format_enumeration(abstract_methods.names().take(max_abstract_methods_to_print));
             diagnostic.set_concise_message(format_args!(
                 "Cannot instantiate `{class_name}` with unimplemented \
                 abstract methods {formatted_methods}"
@@ -3896,7 +3897,7 @@ pub(crate) fn report_attempted_instantiation_of_abstract_class<'db>(
             }
         }
 
-        if let Some(subdiagnostic) = method.explanatory_subdiagnostic(db, name) {
+        if let Some(subdiagnostic) = method.explanatory_subdiagnostic(db) {
             diagnostic.sub(subdiagnostic);
         }
     }

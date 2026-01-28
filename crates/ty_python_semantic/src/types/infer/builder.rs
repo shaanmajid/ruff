@@ -1405,9 +1405,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let abstract_methods = class_type.abstract_methods(db);
 
         // If there are no abstract methods, we're done.
-        let Some((first_method_name, abstract_method)) = abstract_methods.iter().next() else {
+        let Some(abstract_method) = abstract_methods.first(db) else {
             return;
         };
+        let method_name = abstract_method.name;
 
         let Some(builder) = self
             .context
@@ -1420,9 +1421,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             "Final class `{}` does not implement abstract {}",
             class.name(db),
             if abstract_methods.len() == 1 {
-                format!("method `{first_method_name}`")
+                format!("method `{method_name}`")
             } else {
-                format!("methods {}", format_enumeration(abstract_methods.keys()))
+                format!("methods {}", format_enumeration(abstract_methods.names()))
             }
         ));
 
@@ -1430,15 +1431,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let defining_class_name = defining_class.name(db);
         let secondary_annotation = Annotation::secondary(abstract_method.span(db));
         let secondary_annotation = if defining_class.class_literal(db).as_static() == Some(class) {
-            secondary_annotation
-                .message(format_args!("`{first_method_name}` declared as abstract",))
+            secondary_annotation.message(format_args!("`{method_name}` declared as abstract",))
         } else {
             secondary_annotation.message(format_args!(
-                "`{first_method_name}` declared as abstract on superclass `{defining_class_name}`",
+                "`{method_name}` declared as abstract on superclass `{defining_class_name}`",
             ))
         };
         diagnostic.annotate(secondary_annotation);
-        if let Some(sub) = abstract_method.explanatory_subdiagnostic(db, first_method_name) {
+        if let Some(sub) = abstract_method.explanatory_subdiagnostic(db) {
             diagnostic.sub(sub);
         }
     }
@@ -11181,7 +11181,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                             &self.context,
                             call_expression,
                             class,
-                            abstract_methods,
+                            &abstract_methods,
                         );
                     }
                 }
