@@ -61,3 +61,18 @@ def f(x: list[int] | None, y: None):
     # error: [unresolved-attribute] "Object of type `None` has no attribute `index`"
     y.index
 ```
+
+Type aliases of unions should also emit errors for missing attributes:
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+type MaybeList = list[int] | None
+
+def g(x: MaybeList):
+    # error: [unresolved-attribute] "Attribute `index` is not defined on `None` in union `MaybeList`"
+    x.index
+```

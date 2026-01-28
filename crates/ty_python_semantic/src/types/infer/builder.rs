@@ -12416,7 +12416,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     // completely lacking the attribute (rather than the attribute being
                     // conditionally defined within a single type), we should emit an
                     // error instead of a warning.
-                    if let Type::Union(union) = value_type {
+                    //
+                    // We use `as_union_type` to handle not just literal `Type::Union`,
+                    // but also type aliases of unions and NewType of float/complex.
+                    if let Some(union) = value_type.as_union_type(db) {
                         let missing_elements: Vec<_> = union
                             .elements(db)
                             .iter()

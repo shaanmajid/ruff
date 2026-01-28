@@ -1220,6 +1220,27 @@ impl<'db> Type<'db> {
         ty
     }
 
+    /// Returns the `UnionType` if this type should be treated as a union for
+    /// purposes of type checking operations like attribute access, subscripting, etc.
+    ///
+    /// This handles:
+    /// - `Type::Union` - actual union types
+    /// - `Type::TypeAlias` - if the aliased type is a union
+    /// - `Type::NewTypeInstance` - if the base is `float` or `complex` (which are
+    ///   implicitly `int | float` or `int | float | complex`)
+    ///
+    /// Use this when you need to check if some union elements lack a capability
+    /// (e.g., missing an attribute), which should be an error rather than a warning.
+    pub(crate) fn as_union_type(self, db: &'db dyn Db) -> Option<UnionType<'db>> {
+        match self.resolve_type_alias(db) {
+            Type::Union(union) => Some(union),
+            Type::NewTypeInstance(newtype) if newtype.base_is_union(db) => {
+                newtype.concrete_base_type(db).as_union_type(db)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) const fn as_dynamic(self) -> Option<DynamicType<'db>> {
         match self {
             Type::Dynamic(dynamic_type) => Some(dynamic_type),
