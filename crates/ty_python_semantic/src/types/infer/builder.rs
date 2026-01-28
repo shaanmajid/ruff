@@ -11181,7 +11181,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                             &self.context,
                             call_expression,
                             class,
-                            &abstract_methods,
+                            abstract_methods,
                         );
                     }
                 }

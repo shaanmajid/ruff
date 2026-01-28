@@ -1024,7 +1024,7 @@ impl<'db> ClassType<'db> {
     /// and have not been overridden with a concrete implementation anywhere in the MRO
     ///
     /// The value of the map is a struct containing information about the abstract method.
-    #[salsa::tracked(heap_size=ruff_memory_usage::heap_size)]
+    #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn abstract_methods(self, db: &'db dyn Db) -> AbstractMethods<'db> {
         fn function_as_abstract_method<'db>(
             db: &'db dyn Db,
