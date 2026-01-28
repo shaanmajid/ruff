@@ -14,9 +14,7 @@ use crate::semantic_index::place::{PlaceTable, ScopedPlaceId};
 use crate::semantic_index::{global_scope, place_table, use_def_map};
 use crate::suppression::FileSuppressionId;
 use crate::types::call::CallError;
-use crate::types::class::{
-    AbstractMethods, CodeGeneratorKind, DisjointBase, DisjointBaseKind, MethodDecorator,
-};
+use crate::types::class::{CodeGeneratorKind, DisjointBase, DisjointBaseKind, MethodDecorator};
 use crate::types::function::{FunctionDecorators, FunctionType, KnownFunction, OverloadLiteral};
 use crate::types::infer::UnsupportedComparisonError;
 use crate::types::overrides::MethodKind;
@@ -3820,7 +3818,6 @@ pub(crate) fn report_attempted_instantiation_of_abstract_class<'db>(
     context: &'db InferContext<'db, '_>,
     call: &ast::ExprCall,
     class: ClassType<'db>,
-    abstract_methods: &AbstractMethods<'db>,
 ) {
     let Some(builder) = context.report_lint(&CALL_NON_CALLABLE, call) else {
         return;
@@ -3830,6 +3827,7 @@ pub(crate) fn report_attempted_instantiation_of_abstract_class<'db>(
     let mut diagnostic = builder.into_diagnostic(format_args!(
         "Cannot instantiate abstract class `{class_name}`"
     ));
+    let abstract_methods = class.abstract_methods(db);
 
     if let Some(method) = abstract_methods.first(db) {
         let name = method.name;

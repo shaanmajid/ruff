@@ -1402,6 +1402,13 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         }
 
         let class_type = class.identity_specialization(db);
+
+        // Call `.is_abstract()` before calling `.abstract_methods()` to avoid
+        // memoizing an `FxIndexSet` unnecessarily for non-abstract classes.
+        if !class_type.is_abstract(db) {
+            return;
+        }
+
         let abstract_methods = class_type.abstract_methods(db);
 
         // If there are no abstract methods, we're done.
@@ -11174,16 +11181,12 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         call_expression,
                         protocol,
                     );
-                } else {
-                    let abstract_methods = class.abstract_methods(self.db());
-                    if !abstract_methods.is_empty() {
-                        report_attempted_instantiation_of_abstract_class(
-                            &self.context,
-                            call_expression,
-                            class,
-                            &abstract_methods,
-                        );
-                    }
+                } else if class.is_abstract(self.db()) {
+                    report_attempted_instantiation_of_abstract_class(
+                        &self.context,
+                        call_expression,
+                        class,
+                    );
                 }
             }
 
