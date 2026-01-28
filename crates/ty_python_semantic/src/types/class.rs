@@ -2099,6 +2099,16 @@ impl<'db> AbstractMethods<'db> {
     }
 }
 
+/// Return `Some(bool)` if the given type represents an abstract method,
+/// and `None` if it does not. The returned `bool` indicates whether the method
+/// is explicitly abstract (i.e., decorated with `@abstractmethod`) or implicitly
+/// abstract (i.e., a protocol method with no implementation).
+///
+/// # Warning
+///
+/// This function accesses the AST of function bodies.
+/// It should not be used outside of Salsa-tracked functions and/or code paths for
+/// reporting diagnostics!
 fn type_as_abstract_method<'db>(
     db: &'db dyn Db,
     ty: Type<'db>,
