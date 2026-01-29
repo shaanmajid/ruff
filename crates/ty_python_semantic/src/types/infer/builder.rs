@@ -172,6 +172,26 @@ impl<'db> DeclaredAndInferredType<'db> {
     }
 }
 
+#[derive(Copy, Clone, Default)]
+struct SelfAnnotationContext {
+    /// Whether we are in a static method.
+    in_staticmethod: bool,
+    /// Whether we are in a metaclass.
+    in_metaclass: bool,
+}
+
+impl SelfAnnotationContext {
+    /// Return the [`SelfAnnotationContext`] for the given scope.
+    fn for_scope<'a>(db: &'a dyn Db, index: &SemanticIndex<'a>, scope: ScopeId<'a>) -> Self {
+        let in_metaclass = nearest_enclosing_class(db, index, scope)
+            .is_some_and(|class| !class.is_known(db, KnownClass::Type) && class.is_metaclass(db));
+        Self {
+            in_staticmethod: false,
+            in_metaclass,
+        }
+    }
+}
+
 /// A [`CycleDetector`] that is used in `infer_binary_type_comparison`.
 type BinaryComparisonVisitor<'db> = CycleDetector<
     ast::CmpOp,
@@ -231,23 +251,6 @@ const NUM_FIELD_SPECIFIERS_INLINE: usize = 1;
 /// Similarly, when we encounter a standalone-inferable expression (right-hand side of an
 /// assignment, type narrowing guard), we use the [`infer_expression_types()`] query to ensure we
 /// don't infer its types more than once.
-#[derive(Copy, Clone, Default)]
-struct SelfAnnotationContext {
-    in_staticmethod: bool,
-    in_metaclass: bool,
-}
-
-impl SelfAnnotationContext {
-    fn for_scope<'a>(db: &'a dyn Db, index: &SemanticIndex<'a>, scope: ScopeId<'a>) -> Self {
-        let in_metaclass = nearest_enclosing_class(db, index, scope)
-            .is_some_and(|class| !class.is_known(db, KnownClass::Type) && class.is_metaclass(db));
-        Self {
-            in_staticmethod: false,
-            in_metaclass,
-        }
-    }
-}
-
 pub(super) struct TypeInferenceBuilder<'db, 'ast> {
     context: InferContext<'db, 'ast>,
 
@@ -312,6 +315,8 @@ pub(super) struct TypeInferenceBuilder<'db, 'ast> {
     /// Whether we are in a context that binds unbound typevars.
     typevar_binding_context: Option<Definition<'db>>,
 
+    self_annotation_context: SelfAnnotationContext,
+
     /// The deferred state of inferring types of certain expressions within the region.
     ///
     /// This is different from [`InferenceRegion::Deferred`] which works on the entire definition
@@ -322,8 +327,6 @@ pub(super) struct TypeInferenceBuilder<'db, 'ast> {
     /// expression could be deferred if the file has `from __future__ import annotations` import or
     /// is a stub file but we're still in a non-deferred region.
     deferred_state: DeferredExpressionState,
-
-    self_annotation_context: SelfAnnotationContext,
 
     multi_inference_state: MultiInferenceState,
 
@@ -347,32 +350,6 @@ pub(super) struct TypeInferenceBuilder<'db, 'ast> {
 }
 
 impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
-    fn is_typing_self_type(&self, ty: Type<'db>) -> bool {
-        match ty {
-            Type::SpecialForm(SpecialFormType::TypingSelf) => true,
-            Type::TypeVar(typevar) => typevar.kind(self.db()) == TypeVarKind::TypingSelf,
-            _ => false,
-        }
-    }
-
-    fn report_invalid_self_type(&self, ty: Type<'db>, node: &impl Ranged) -> bool {
-        if !self.is_typing_self_type(ty) {
-            return false;
-        }
-        if self.self_annotation_context.in_staticmethod {
-            if let Some(builder) = self.context.report_lint(&INVALID_TYPE_FORM, node) {
-                builder.into_diagnostic("`Self` cannot be used in a static method");
-            }
-            return true;
-        }
-        if self.self_annotation_context.in_metaclass {
-            if let Some(builder) = self.context.report_lint(&INVALID_TYPE_FORM, node) {
-                builder.into_diagnostic("`Self` cannot be used in a metaclass");
-            }
-            return true;
-        }
-        false
-    }
     /// How big a string do we build before bailing?
     ///
     /// This is a fairly arbitrary number. It should be *far* more than enough
@@ -396,7 +373,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             return_types_and_ranges: vec![],
             called_functions: FxIndexSet::default(),
             deferred_state: DeferredExpressionState::None,
-            self_annotation_context: SelfAnnotationContext::for_scope(db, index, scope),
             multi_inference_state: MultiInferenceState::Panic,
             inner_expression_inference_state: InnerExpressionInferenceState::Infer,
             expressions: FxHashMap::default(),
@@ -404,6 +380,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             bindings: VecMap::default(),
             declarations: VecMap::default(),
             typevar_binding_context: None,
+            self_annotation_context: SelfAnnotationContext::for_scope(db, index, scope),
             deferred: VecSet::default(),
             undecorated_type: None,
             cycle_recovery: None,
@@ -2391,11 +2368,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let previous_typevar_binding_context =
             self.typevar_binding_context.replace(binding_context);
         let previous_self_annotation_context = self.self_annotation_context;
-        let function_decorators = self.function_has_staticmethod_decorator(function);
-        let in_staticmethod =
-            self.self_binds_to_staticmethod_in_scope(self.scope(), Some(function_decorators));
-        self.self_annotation_context =
-            self.self_annotation_context_for_function(function, in_staticmethod);
+
+        let in_staticmethod = self.self_binds_to_staticmethod_in_scope(self.scope());
+        self.self_annotation_context = self.self_annotation_context_for_function(in_staticmethod);
 
         self.infer_return_type_annotation(
             function.returns.as_deref(),
@@ -2487,78 +2462,61 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             .map(|node_ref| node_ref.node(self.module()))
     }
 
-    fn function_decorator_types<'a>(
-        &'a self,
-        function: &'a ast::StmtFunctionDef,
-    ) -> impl Iterator<Item = Type<'db>> + 'a {
-        let definition = self.index.expect_single_definition(function);
+    fn self_binds_to_staticmethod_in_scope(&self, scope: ScopeId<'db>) -> bool {
+        let file_scope_id = scope.file_scope_id(self.db());
+        let mut binding_definition = None;
 
-        let definition_types = infer_definition_types(self.db(), definition);
+        if let NodeWithScopeKind::FunctionTypeParameters(function) =
+            self.index.scope(file_scope_id).node()
+        {
+            let parent_scope_id = self.index.parent_scope_id(file_scope_id);
+            if parent_scope_id.is_some_and(|parent_scope_id| {
+                let parent_scope = self.index.scope(parent_scope_id);
+                parent_scope.kind() == ScopeKind::Function
+                    && self.index.parent_scope_id(parent_scope_id).is_some_and(
+                        |grandparent_scope_id| {
+                            self.index.scope(grandparent_scope_id).kind().is_class()
+                        },
+                    )
+            }) {
+                binding_definition = Some(self.index.expect_single_definition(function));
+            }
+        }
 
-        function
-            .decorator_list
-            .iter()
-            .map(move |decorator| definition_types.expression_type(&decorator.expression))
-    }
+        if binding_definition.is_none() {
+            binding_definition = self
+                .index
+                .ancestor_scopes(file_scope_id)
+                .tuple_windows()
+                .find_map(|((_, inner), (_, outer))| {
+                    if !outer.kind().is_class() {
+                        return None;
+                    }
+                    let function = inner.node().as_function()?;
+                    Some(self.index.expect_single_definition(function))
+                });
+        }
 
-    fn function_has_staticmethod_decorator(&self, function: &ast::StmtFunctionDef) -> bool {
-        let definition = self.index.expect_single_definition(function);
-        let inference = infer_definition_types(self.db(), definition);
+        let Some(binding_definition) = binding_definition else {
+            return false;
+        };
+        let DefinitionKind::Function(function) = binding_definition.kind(self.db()) else {
+            return false;
+        };
+        let function = function.node(self.module());
+        if function.name.as_str() == "__new__" {
+            return false;
+        }
+        let inference = infer_definition_types(self.db(), binding_definition);
         let ty = inference
             .undecorated_type()
-            .unwrap_or_else(|| inference.declaration_type(definition).inner_type());
+            .unwrap_or_else(|| inference.declaration_type(binding_definition).inner_type());
         ty.as_function_literal().is_some_and(|function| {
             function.has_known_decorator(self.db(), FunctionDecorators::STATICMETHOD)
         })
     }
 
-    fn self_binds_to_staticmethod_in_scope(
-        &self,
-        scope: ScopeId<'db>,
-        current_function_staticmethod: Option<bool>,
-    ) -> bool {
-        let file_scope_id = scope.file_scope_id(self.db());
-        let current_scope = self.index.scope(file_scope_id);
-        if let NodeWithScopeKind::FunctionTypeParameters(function) = current_scope.node() {
-            let function_node = function.node(self.module());
-            if function_node.name.as_str() == "__new__" {
-                return false;
-            }
-            return current_function_staticmethod
-                .unwrap_or_else(|| self.function_has_staticmethod_decorator(function_node));
-        }
-        for ((inner_id, inner), (_, outer)) in
-            self.index.ancestor_scopes(file_scope_id).tuple_windows()
-        {
-            if !outer.kind().is_class() {
-                continue;
-            }
-            let NodeWithScopeKind::Function(function) = inner.node() else {
-                continue;
-            };
-            let function_node = function.node(self.module());
-            if function_node.name.as_str() == "__new__" {
-                return false;
-            }
-            if inner_id == file_scope_id {
-                if let Some(is_staticmethod) = current_function_staticmethod {
-                    return is_staticmethod;
-                }
-            }
-            return self.function_has_staticmethod_decorator(function_node);
-        }
-        false
-    }
-
-    fn self_annotation_context_for_function(
-        &self,
-        function: &ast::StmtFunctionDef,
-        in_staticmethod: bool,
-    ) -> SelfAnnotationContext {
-        let mut in_staticmethod = in_staticmethod;
-        if in_staticmethod && function.name.as_str() == "__new__" {
-            in_staticmethod = false;
-        }
+    fn self_annotation_context_for_function(&self, in_staticmethod: bool) -> SelfAnnotationContext {
         SelfAnnotationContext {
             in_staticmethod,
             in_metaclass: self.self_annotation_context.in_metaclass,
@@ -2573,33 +2531,31 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             return false;
         };
 
-        self.function_decorator_types(function)
-            .any(|decorator_type| {
-                match decorator_type {
-                    Type::FunctionLiteral(function) => matches!(
-                        function.known(self.db()),
-                        Some(KnownFunction::Overload | KnownFunction::AbstractMethod)
-                    ),
-                    Type::Never => {
-                        // In unreachable code, we infer `Never` for decorators like `typing.overload`.
-                        // Return `true` here to avoid false positive `invalid-return-type` lints for
-                        // `@overload`ed functions without a body in unreachable code.
-                        true
-                    }
-                    Type::Dynamic(DynamicType::Divergent(_)) => true,
-                    _ => false,
+        let definition = self.index.expect_single_definition(function);
+        let inference = infer_definition_types(self.db(), definition);
+
+        function.decorator_list.iter().any(|decorator| {
+            match inference.expression_type(&decorator.expression) {
+                Type::FunctionLiteral(function) => matches!(
+                    function.known(self.db()),
+                    Some(KnownFunction::Overload | KnownFunction::AbstractMethod)
+                ),
+                Type::Never => {
+                    // In unreachable code, we infer `Never` for decorators like `typing.overload`.
+                    // Return `true` here to avoid false positive `invalid-return-type` lints for
+                    // `@overload`ed functions without a body in unreachable code.
+                    true
                 }
-            })
+                Type::Dynamic(DynamicType::Divergent(_)) => true,
+                _ => false,
+            }
+        })
     }
 
     fn infer_function_body(&mut self, function: &ast::StmtFunctionDef) {
         let previous_self_annotation_context = self.self_annotation_context;
-        let in_staticmethod = self.self_binds_to_staticmethod_in_scope(
-            self.scope(),
-            Some(self.function_has_staticmethod_decorator(function)),
-        );
-        self.self_annotation_context =
-            self.self_annotation_context_for_function(function, in_staticmethod);
+        let in_staticmethod = self.self_binds_to_staticmethod_in_scope(self.scope());
+        self.self_annotation_context = self.self_annotation_context_for_function(in_staticmethod);
 
         // Parameters are odd: they are Definitions in the function body scope, but have no
         // constituent nodes that are part of the function body. In order to get diagnostics
@@ -3544,12 +3500,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 .index
                 .node_scope(NodeWithScopeRef::Function(function))
                 .to_scope_id(self.db(), self.file());
-            let in_staticmethod = self.self_binds_to_staticmethod_in_scope(
-                function_scope,
-                Some(function_decorators.contains(FunctionDecorators::STATICMETHOD)),
-            );
+            let in_staticmethod = self.self_binds_to_staticmethod_in_scope(function_scope);
             self.self_annotation_context =
-                self.self_annotation_context_for_function(function, in_staticmethod);
+                self.self_annotation_context_for_function(in_staticmethod);
             self.infer_return_type_annotation(
                 function.returns.as_deref(),
                 self.defer_annotations().into(),
@@ -12279,6 +12232,25 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 "An attribute `{id}` is available: consider using `{first_parameter_name}.{id}`"
             ));
         }
+    }
+
+    fn report_invalid_self_type(&self, ty: Type<'db>, node: &impl Ranged) -> bool {
+        if !ty.is_typing_self(self.db()) {
+            return false;
+        }
+        if self.self_annotation_context.in_staticmethod {
+            if let Some(builder) = self.context.report_lint(&INVALID_TYPE_FORM, node) {
+                builder.into_diagnostic("`Self` cannot be used in a static method");
+            }
+            return true;
+        }
+        if self.self_annotation_context.in_metaclass {
+            if let Some(builder) = self.context.report_lint(&INVALID_TYPE_FORM, node) {
+                builder.into_diagnostic("`Self` cannot be used in a metaclass");
+            }
+            return true;
+        }
+        false
     }
 
     fn infer_name_expression(&mut self, name: &ast::ExprName) -> Type<'db> {

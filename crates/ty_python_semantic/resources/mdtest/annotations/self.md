@@ -602,7 +602,7 @@ class Bar(Generic[T]): ...
 class Baz(Bar[Self]): ...
 ```
 
-## Static method edge cases
+## Self usage in static methods
 
 `Self` cannot be used anywhere in a static method, including parameters, return types, nested
 functions, and default argument values.
@@ -653,8 +653,10 @@ class AliasedStaticMethod:
 
 ## `__new__` allows `Self`
 
-`__new__` is implicitly a static method, but unlike regular static methods, `Self` is valid in
-`__new__` because it receives a `cls` argument with type `type[Self]` and typically returns `Self`:
+`__new__` is a static method even without an explicit `@staticmethod` decorator, but at runtime it
+is heavily special-cased by the interpreter to behave more like a classmethod. It always receives a
+`cls` parameter with type `type[Self]` and typically returns an object of type `Self`, so `Self` is
+permitted in `__new__`:
 
 ```py
 from typing import Self
@@ -699,7 +701,7 @@ class StackedDecorators:
         pass
 ```
 
-## Metaclass edge cases
+## Self usage in metaclasses
 
 `Self` cannot be used in a metaclass because the semantics are confusing: in a metaclass, `self`
 refers to a class (the metaclass instance), not a regular object instance.

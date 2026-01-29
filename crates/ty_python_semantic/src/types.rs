@@ -1033,6 +1033,14 @@ impl<'db> Type<'db> {
         }
     }
 
+    pub(crate) fn is_typing_self(self, db: &'db dyn Db) -> bool {
+        match self {
+            Type::SpecialForm(SpecialFormType::TypingSelf) => true,
+            Type::TypeVar(typevar) => typevar.kind(db) == TypeVarKind::TypingSelf,
+            _ => false,
+        }
+    }
+
     pub(crate) const fn is_dynamic(&self) -> bool {
         matches!(self, Type::Dynamic(_))
     }
@@ -5763,11 +5771,11 @@ impl<'db> Type<'db> {
                         });
                     };
 
-                    // Create the bound Self type variable.
-                    let bound_self =
-                        typing_self(db, scope_id, typevar_binding_context, class.into());
-
-                    Ok(bound_self.map(Type::TypeVar).unwrap_or(*self))
+                    Ok(
+                        typing_self(db, scope_id, typevar_binding_context, class.into())
+                            .map(Type::TypeVar)
+                            .unwrap_or(*self),
+                    )
                 }
                 // We ensure that `typing.TypeAlias` used in the expected position (annotating an
                 // annotated assignment statement) doesn't reach here. Using it in any other type
