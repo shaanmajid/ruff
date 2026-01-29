@@ -91,17 +91,58 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         // https://typing.python.org/en/latest/spec/annotations.html#grammar-token-expression-grammar-type_expression
         match expression {
             ast::Expr::Name(name) => match name.ctx {
-                ast::ExprContext::Load => self
-                    .infer_name_expression(name)
-                    .default_specialize(self.db())
-                    .in_type_expression(self.db(), self.scope(), self.typevar_binding_context)
-                    .unwrap_or_else(|error| {
-                        error.into_fallback_type(
-                            &self.context,
-                            expression,
-                            self.is_reachable(expression),
-                        )
-                    }),
+                ast::ExprContext::Load => {
+                    let name_type = self.infer_name_expression(name);
+                    if let Type::TypeVar(typevar) = name_type
+                        && typevar.kind(self.db()) == TypeVarKind::TypingSelf
+                    {
+                        if self.self_annotation_context.in_staticmethod {
+                            if let Some(builder) =
+                                self.context.report_lint(&INVALID_TYPE_FORM, expression)
+                            {
+                                builder.into_diagnostic("`Self` cannot be used in a static method");
+                            }
+                            return Type::unknown();
+                        }
+                        if self.self_annotation_context.in_metaclass {
+                            if let Some(builder) =
+                                self.context.report_lint(&INVALID_TYPE_FORM, expression)
+                            {
+                                builder.into_diagnostic("`Self` cannot be used in a metaclass");
+                            }
+                            return Type::unknown();
+                        }
+                    }
+                    if let Type::SpecialForm(SpecialFormType::TypingSelf) = name_type {
+                        if self.self_annotation_context.in_staticmethod {
+                            if let Some(builder) =
+                                self.context.report_lint(&INVALID_TYPE_FORM, expression)
+                            {
+                                builder.into_diagnostic("`Self` cannot be used in a static method");
+                            }
+                            return Type::unknown();
+                        }
+                        if self.self_annotation_context.in_metaclass {
+                            if let Some(builder) =
+                                self.context.report_lint(&INVALID_TYPE_FORM, expression)
+                            {
+                                builder.into_diagnostic("`Self` cannot be used in a metaclass");
+                            }
+                            return Type::unknown();
+                        }
+                    }
+
+                    name_type
+                        .default_specialize(self.db())
+                        .in_type_expression(self.db(), self.scope(), self.typevar_binding_context)
+                        .unwrap_or_else(|error| {
+                            error.into_fallback_type(
+                                &self.context,
+                                expression,
+                                self.is_reachable(expression),
+                            )
+                        })
+                }
                 ast::ExprContext::Invalid => Type::unknown(),
                 ast::ExprContext::Store | ast::ExprContext::Del => {
                     todo_type!("Name expression annotation in Store/Del context")
@@ -109,17 +150,58 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             },
 
             ast::Expr::Attribute(attribute_expression) => match attribute_expression.ctx {
-                ast::ExprContext::Load => self
-                    .infer_attribute_expression(attribute_expression)
-                    .default_specialize(self.db())
-                    .in_type_expression(self.db(), self.scope(), self.typevar_binding_context)
-                    .unwrap_or_else(|error| {
-                        error.into_fallback_type(
-                            &self.context,
-                            expression,
-                            self.is_reachable(expression),
-                        )
-                    }),
+                ast::ExprContext::Load => {
+                    let attribute_type = self.infer_attribute_expression(attribute_expression);
+                    if let Type::TypeVar(typevar) = attribute_type
+                        && typevar.kind(self.db()) == TypeVarKind::TypingSelf
+                    {
+                        if self.self_annotation_context.in_staticmethod {
+                            if let Some(builder) =
+                                self.context.report_lint(&INVALID_TYPE_FORM, expression)
+                            {
+                                builder.into_diagnostic("`Self` cannot be used in a static method");
+                            }
+                            return Type::unknown();
+                        }
+                        if self.self_annotation_context.in_metaclass {
+                            if let Some(builder) =
+                                self.context.report_lint(&INVALID_TYPE_FORM, expression)
+                            {
+                                builder.into_diagnostic("`Self` cannot be used in a metaclass");
+                            }
+                            return Type::unknown();
+                        }
+                    }
+                    if let Type::SpecialForm(SpecialFormType::TypingSelf) = attribute_type {
+                        if self.self_annotation_context.in_staticmethod {
+                            if let Some(builder) =
+                                self.context.report_lint(&INVALID_TYPE_FORM, expression)
+                            {
+                                builder.into_diagnostic("`Self` cannot be used in a static method");
+                            }
+                            return Type::unknown();
+                        }
+                        if self.self_annotation_context.in_metaclass {
+                            if let Some(builder) =
+                                self.context.report_lint(&INVALID_TYPE_FORM, expression)
+                            {
+                                builder.into_diagnostic("`Self` cannot be used in a metaclass");
+                            }
+                            return Type::unknown();
+                        }
+                    }
+
+                    attribute_type
+                        .default_specialize(self.db())
+                        .in_type_expression(self.db(), self.scope(), self.typevar_binding_context)
+                        .unwrap_or_else(|error| {
+                            error.into_fallback_type(
+                                &self.context,
+                                expression,
+                                self.is_reachable(expression),
+                            )
+                        })
+                }
                 ast::ExprContext::Invalid => Type::unknown(),
                 ast::ExprContext::Store | ast::ExprContext::Del => {
                     todo_type!("Attribute expression annotation in Store/Del context")

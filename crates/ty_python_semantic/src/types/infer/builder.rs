@@ -106,7 +106,7 @@ use crate::types::generics::{
     GenericContext, InferableTypeVars, SpecializationBuilder, bind_typevar,
     enclosing_generic_contexts, typing_self,
 };
-use crate::types::infer::nearest_enclosing_function;
+use crate::types::infer::{nearest_enclosing_class, nearest_enclosing_function};
 use crate::types::mro::{DynamicMroErrorKind, StaticMroErrorKind};
 use crate::types::newtype::NewType;
 use crate::types::subclass_of::SubclassOfInner;
@@ -231,6 +231,23 @@ const NUM_FIELD_SPECIFIERS_INLINE: usize = 1;
 /// Similarly, when we encounter a standalone-inferable expression (right-hand side of an
 /// assignment, type narrowing guard), we use the [`infer_expression_types()`] query to ensure we
 /// don't infer its types more than once.
+#[derive(Copy, Clone, Default)]
+struct SelfAnnotationContext {
+    in_staticmethod: bool,
+    in_metaclass: bool,
+}
+
+impl SelfAnnotationContext {
+    fn for_scope<'a>(db: &'a dyn Db, index: &SemanticIndex<'a>, scope: ScopeId<'a>) -> Self {
+        let in_metaclass = nearest_enclosing_class(db, index, scope)
+            .is_some_and(|class| !class.is_known(db, KnownClass::Type) && class.is_metaclass(db));
+        Self {
+            in_staticmethod: false,
+            in_metaclass,
+        }
+    }
+}
+
 pub(super) struct TypeInferenceBuilder<'db, 'ast> {
     context: InferContext<'db, 'ast>,
 
@@ -306,6 +323,8 @@ pub(super) struct TypeInferenceBuilder<'db, 'ast> {
     /// is a stub file but we're still in a non-deferred region.
     deferred_state: DeferredExpressionState,
 
+    self_annotation_context: SelfAnnotationContext,
+
     multi_inference_state: MultiInferenceState,
 
     /// If you cannot avoid the possibility of calling `infer(_type)_expression` multiple times for a given expression,
@@ -351,6 +370,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             return_types_and_ranges: vec![],
             called_functions: FxIndexSet::default(),
             deferred_state: DeferredExpressionState::None,
+            self_annotation_context: SelfAnnotationContext::for_scope(db, index, scope),
             multi_inference_state: MultiInferenceState::Panic,
             inner_expression_inference_state: InnerExpressionInferenceState::Infer,
             expressions: FxHashMap::default(),
@@ -2344,12 +2364,21 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let binding_context = self.index.expect_single_definition(function);
         let previous_typevar_binding_context =
             self.typevar_binding_context.replace(binding_context);
+        let previous_self_annotation_context = self.self_annotation_context;
+        let function_decorators = self.function_has_staticmethod_decorator(function);
+        let in_staticmethod =
+            self.self_binds_to_staticmethod_in_scope(self.scope(), Some(function_decorators));
+        self.self_annotation_context =
+            self.self_annotation_context_for_function(function, in_staticmethod);
+
         self.infer_return_type_annotation(
             function.returns.as_deref(),
             self.defer_annotations().into(),
         );
         self.infer_type_parameters(type_params);
         self.infer_parameters(&function.parameters);
+
+        self.self_annotation_context = previous_self_annotation_context;
         self.typevar_binding_context = previous_typevar_binding_context;
     }
 
@@ -2446,6 +2475,67 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             .map(move |decorator| definition_types.expression_type(&decorator.expression))
     }
 
+    fn function_has_staticmethod_decorator(&self, function: &ast::StmtFunctionDef) -> bool {
+        self.function_decorator_types(function)
+            .any(|decorator_type| {
+                FunctionDecorators::from_decorator_type(self.db(), decorator_type)
+                    .contains(FunctionDecorators::STATICMETHOD)
+            })
+    }
+
+    fn self_binds_to_staticmethod_in_scope(
+        &self,
+        scope: ScopeId<'db>,
+        current_function_staticmethod: Option<bool>,
+    ) -> bool {
+        let file_scope_id = scope.file_scope_id(self.db());
+        let current_scope = self.index.scope(file_scope_id);
+        if let NodeWithScopeKind::FunctionTypeParameters(function) = current_scope.node() {
+            let function_node = function.node(self.module());
+            if function_node.name.as_str() == "__new__" {
+                return false;
+            }
+            return current_function_staticmethod
+                .unwrap_or_else(|| self.function_has_staticmethod_decorator(function_node));
+        }
+        for ((inner_id, inner), (_, outer)) in
+            self.index.ancestor_scopes(file_scope_id).tuple_windows()
+        {
+            if !outer.kind().is_class() {
+                continue;
+            }
+            let NodeWithScopeKind::Function(function) = inner.node() else {
+                continue;
+            };
+            let function_node = function.node(self.module());
+            if function_node.name.as_str() == "__new__" {
+                return false;
+            }
+            if inner_id == file_scope_id {
+                if let Some(is_staticmethod) = current_function_staticmethod {
+                    return is_staticmethod;
+                }
+            }
+            return self.function_has_staticmethod_decorator(function_node);
+        }
+        false
+    }
+
+    fn self_annotation_context_for_function(
+        &self,
+        function: &ast::StmtFunctionDef,
+        in_staticmethod: bool,
+    ) -> SelfAnnotationContext {
+        let mut in_staticmethod = in_staticmethod;
+        if in_staticmethod && function.name.as_str() == "__new__" {
+            in_staticmethod = false;
+        }
+        SelfAnnotationContext {
+            in_staticmethod,
+            in_metaclass: self.self_annotation_context.in_metaclass,
+        }
+    }
+
     /// Returns `true` if the current scope is the function body scope of a function overload (that
     /// is, the stub declaration decorated with `@overload`, not the implementation), or an
     /// abstract method (decorated with `@abstractmethod`.)
@@ -2474,6 +2564,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     }
 
     fn infer_function_body(&mut self, function: &ast::StmtFunctionDef) {
+        let previous_self_annotation_context = self.self_annotation_context;
+        let in_staticmethod = self.self_binds_to_staticmethod_in_scope(
+            self.scope(),
+            Some(self.function_has_staticmethod_decorator(function)),
+        );
+        self.self_annotation_context =
+            self.self_annotation_context_for_function(function, in_staticmethod);
+
         // Parameters are odd: they are Definitions in the function body scope, but have no
         // constituent nodes that are part of the function body. In order to get diagnostics
         // merged/emitted for them, we need to explicitly infer their definitions here.
@@ -2481,6 +2579,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             self.infer_definition(parameter);
         }
         self.infer_body(&function.body);
+        self.self_annotation_context = previous_self_annotation_context;
 
         if let Some(returns) = function.returns.as_deref() {
             fn is_stub_suite(suite: &[ast::Stmt]) -> bool {
@@ -3386,8 +3485,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         function: &ast::StmtFunctionDef,
     ) {
         let mut prev_in_no_type_check = self.context.set_in_no_type_check(InNoTypeCheck::Yes);
+        let mut function_decorators = FunctionDecorators::empty();
         for decorator in &function.decorator_list {
             let decorator_type = self.infer_decorator(decorator);
+            function_decorators |=
+                FunctionDecorators::from_decorator_type(self.db(), decorator_type);
             if let Type::FunctionLiteral(function) = decorator_type
                 && let Some(KnownFunction::NoTypeCheck) = function.known(self.db())
             {
@@ -3408,11 +3510,23 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let previous_typevar_binding_context = self.typevar_binding_context.replace(definition);
 
         if !has_type_params {
+            let previous_self_annotation_context = self.self_annotation_context;
+            let function_scope = self
+                .index
+                .node_scope(NodeWithScopeRef::Function(function))
+                .to_scope_id(self.db(), self.file());
+            let in_staticmethod = self.self_binds_to_staticmethod_in_scope(
+                function_scope,
+                Some(function_decorators.contains(FunctionDecorators::STATICMETHOD)),
+            );
+            self.self_annotation_context =
+                self.self_annotation_context_for_function(function, in_staticmethod);
             self.infer_return_type_annotation(
                 function.returns.as_deref(),
                 self.defer_annotations().into(),
             );
             self.infer_parameters(function.parameters.as_ref());
+            self.self_annotation_context = previous_self_annotation_context;
         }
 
         if has_defaults {
@@ -15427,6 +15541,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             // builder only state
             typevar_binding_context: _,
             deferred_state: _,
+            self_annotation_context: _,
             multi_inference_state: _,
             inner_expression_inference_state: _,
             called_functions: _,
@@ -15495,6 +15610,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             all_definitely_bound: _,
             typevar_binding_context: _,
             deferred_state: _,
+            self_annotation_context: _,
             multi_inference_state: _,
             inner_expression_inference_state: _,
             index: _,
@@ -15576,6 +15692,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             all_definitely_bound: _,
             typevar_binding_context: _,
             deferred_state: _,
+            self_annotation_context: _,
             multi_inference_state: _,
             inner_expression_inference_state: _,
             called_functions: _,
