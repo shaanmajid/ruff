@@ -7,8 +7,7 @@ use crate::types::string_annotation::{
     BYTE_STRING_TYPE_ANNOTATION, FSTRING_TYPE_ANNOTATION, parse_string_annotation,
 };
 use crate::types::{
-    KnownClass, SpecialFormType, Type, TypeAndQualifiers, TypeContext, TypeQualifiers, TypeVarKind,
-    todo_type,
+    KnownClass, SpecialFormType, Type, TypeAndQualifiers, TypeContext, TypeQualifiers, todo_type,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -87,6 +86,9 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             builder: &TypeInferenceBuilder<'db, '_>,
             pep_613_policy: PEP613Policy,
         ) -> TypeAndQualifiers<'db> {
+            if builder.report_invalid_self_type(ty, annotation) {
+                return TypeAndQualifiers::declared(Type::unknown());
+            }
             match ty {
                 Type::SpecialForm(SpecialFormType::ClassVar) => TypeAndQualifiers::new(
                     Type::unknown(),
@@ -113,48 +115,6 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     TypeOrigin::Declared,
                     TypeQualifiers::READ_ONLY,
                 ),
-                Type::TypeVar(typevar)
-                    if typevar.kind(builder.db()) == TypeVarKind::TypingSelf
-                        && builder.self_annotation_context.in_staticmethod =>
-                {
-                    if let Some(builder) =
-                        builder.context.report_lint(&INVALID_TYPE_FORM, annotation)
-                    {
-                        builder.into_diagnostic("`Self` cannot be used in a static method");
-                    }
-                    TypeAndQualifiers::declared(Type::unknown())
-                }
-                Type::TypeVar(typevar)
-                    if typevar.kind(builder.db()) == TypeVarKind::TypingSelf
-                        && builder.self_annotation_context.in_metaclass =>
-                {
-                    if let Some(builder) =
-                        builder.context.report_lint(&INVALID_TYPE_FORM, annotation)
-                    {
-                        builder.into_diagnostic("`Self` cannot be used in a metaclass");
-                    }
-                    TypeAndQualifiers::declared(Type::unknown())
-                }
-                Type::SpecialForm(SpecialFormType::TypingSelf)
-                    if builder.self_annotation_context.in_staticmethod =>
-                {
-                    if let Some(builder) =
-                        builder.context.report_lint(&INVALID_TYPE_FORM, annotation)
-                    {
-                        builder.into_diagnostic("`Self` cannot be used in a static method");
-                    }
-                    TypeAndQualifiers::declared(Type::unknown())
-                }
-                Type::SpecialForm(SpecialFormType::TypingSelf)
-                    if builder.self_annotation_context.in_metaclass =>
-                {
-                    if let Some(builder) =
-                        builder.context.report_lint(&INVALID_TYPE_FORM, annotation)
-                    {
-                        builder.into_diagnostic("`Self` cannot be used in a metaclass");
-                    }
-                    TypeAndQualifiers::declared(Type::unknown())
-                }
                 Type::SpecialForm(SpecialFormType::TypeAlias)
                     if pep_613_policy == PEP613Policy::Allowed =>
                 {

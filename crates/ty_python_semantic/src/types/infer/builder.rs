@@ -347,6 +347,32 @@ pub(super) struct TypeInferenceBuilder<'db, 'ast> {
 }
 
 impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
+    fn is_typing_self_type(&self, ty: Type<'db>) -> bool {
+        match ty {
+            Type::SpecialForm(SpecialFormType::TypingSelf) => true,
+            Type::TypeVar(typevar) => typevar.kind(self.db()) == TypeVarKind::TypingSelf,
+            _ => false,
+        }
+    }
+
+    fn report_invalid_self_type(&self, ty: Type<'db>, node: &impl Ranged) -> bool {
+        if !self.is_typing_self_type(ty) {
+            return false;
+        }
+        if self.self_annotation_context.in_staticmethod {
+            if let Some(builder) = self.context.report_lint(&INVALID_TYPE_FORM, node) {
+                builder.into_diagnostic("`Self` cannot be used in a static method");
+            }
+            return true;
+        }
+        if self.self_annotation_context.in_metaclass {
+            if let Some(builder) = self.context.report_lint(&INVALID_TYPE_FORM, node) {
+                builder.into_diagnostic("`Self` cannot be used in a metaclass");
+            }
+            return true;
+        }
+        false
+    }
     /// How big a string do we build before bailing?
     ///
     /// This is a fairly arbitrary number. It should be *far* more than enough
@@ -2476,11 +2502,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     }
 
     fn function_has_staticmethod_decorator(&self, function: &ast::StmtFunctionDef) -> bool {
-        self.function_decorator_types(function)
-            .any(|decorator_type| {
-                FunctionDecorators::from_decorator_type(self.db(), decorator_type)
-                    .contains(FunctionDecorators::STATICMETHOD)
-            })
+        let definition = self.index.expect_single_definition(function);
+        let inference = infer_definition_types(self.db(), definition);
+        let ty = inference
+            .undecorated_type()
+            .unwrap_or_else(|| inference.declaration_type(definition).inner_type());
+        ty.as_function_literal().is_some_and(|function| {
+            function.has_known_decorator(self.db(), FunctionDecorators::STATICMETHOD)
+        })
     }
 
     fn self_binds_to_staticmethod_in_scope(
