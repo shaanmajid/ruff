@@ -120,14 +120,6 @@ fn try_mro_cycle_initial<'db>(
     ))
 }
 
-fn is_metaclass_cycle_initial<'db>(
-    _db: &'db dyn Db,
-    _id: salsa::Id,
-    _self: StaticClassLiteral<'db>,
-) -> bool {
-    false
-}
-
 #[allow(clippy::unnecessary_wraps)]
 fn try_metaclass_cycle_initial<'db>(
     _db: &'db dyn Db,
@@ -2720,24 +2712,28 @@ impl<'db> StaticClassLiteral<'db> {
     }
 
     /// Return `true` if this class is a metaclass (i.e., a subclass of `type`).
-    ///
-    /// This is cached to avoid repeated computation for the same class.
-    #[salsa::tracked(cycle_initial=is_metaclass_cycle_initial,
-        heap_size=ruff_memory_usage::heap_size
-    )]
     pub(super) fn is_metaclass(self, db: &'db dyn Db) -> bool {
+        let mut visiting = FxHashSet::default();
+        self.is_metaclass_inner(db, &mut visiting)
+    }
+
+    fn is_metaclass_inner(self, db: &'db dyn Db, visiting: &mut FxHashSet<Self>) -> bool {
         // The `type` class itself is a metaclass.
         if self.is_known(db, KnownClass::Type) {
             return true;
         }
 
+        // If we encounter a cycle, conservatively return false.
+        if !visiting.insert(self) {
+            return false;
+        }
+
         // Check if any explicit base is a metaclass. This is more efficient than
-        // iterating the full MRO because explicit bases are typically few, and
-        // recursive calls to is_metaclass are cached.
+        // iterating the full MRO because explicit bases are typically few.
         self.explicit_bases(db).iter().any(|base| {
             base.as_class_literal()
                 .and_then(ClassLiteral::as_static)
-                .is_some_and(|cls| cls.is_metaclass(db))
+                .is_some_and(|cls| cls.is_metaclass_inner(db, visiting))
         })
     }
 
