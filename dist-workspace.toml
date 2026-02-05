@@ -53,6 +53,8 @@ github-attestations = true
 github-attestations-phase = "announce"
 # Patterns to attest when creating attestations for release artifacts
 github-attestations-filters = ["*.json", "*.sh", "*.ps1", "*.zip", "*.tar.gz"]
+# Allow dirty CI files (for fork testing with modified runners)
+allow-dirty = ["ci"]
 # Whether CI should include auto-generated code to build local artifacts
 build-local-artifacts = false
 # Local artifacts jobs to run in CI

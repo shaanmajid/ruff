@@ -30,8 +30,6 @@ jobs:
   docker-build:
     name: Build Docker image (ghcr.io/astral-sh/ruff) for ${{ matrix.platform }}
     runs-on: ubuntu-latest
-    environment:
-      name: release
     strategy:
       fail-fast: false
       matrix:
@@ -112,8 +110,6 @@ jobs:
   docker-publish:
     name: Publish Docker image (ghcr.io/astral-sh/ruff)
     runs-on: ubuntu-latest
-    environment:
-      name: release
     needs:
       - docker-build
     if: ${{ inputs.plan != '' && !fromJson(inputs.plan).announcement_tag_is_implicit }}
@@ -182,8 +178,6 @@ jobs:
   docker-publish-extra:
     name: Publish additional Docker image based on ${{ matrix.image-mapping }}
     runs-on: ubuntu-latest
-    environment:
-      name: release
     needs:
       - docker-publish
     if: ${{ inputs.plan != '' && !fromJson(inputs.plan).announcement_tag_is_implicit }}
@@ -290,8 +284,6 @@ jobs:
   docker-republish:
     name: Annotate Docker image (ghcr.io/astral-sh/ruff)
     runs-on: ubuntu-latest
-    environment:
-      name: release
     needs:
       - docker-publish-extra
     if: ${{ inputs.plan != '' && !fromJson(inputs.plan).announcement_tag_is_implicit }}
