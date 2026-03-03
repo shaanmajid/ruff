@@ -598,6 +598,13 @@ jobs:
       - name: Build comparison version
         run: cargo build --bin ruff
 
+      - name: "Upload ruff binary"
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ruff-linux-x86_64-${{ github.sha }}
+          path: target/debug/ruff
+          retention-days: 1
+
       - name: Install ruff-ecosystem
         run: |
           uv pip install ./python/ruff-ecosystem
