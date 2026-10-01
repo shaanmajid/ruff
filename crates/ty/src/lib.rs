@@ -83,7 +83,7 @@ fn version(output_format: HelpFormat) -> Result<()> {
 
     match output_format {
         HelpFormat::Text => {
-            writeln!(stdout, "ty {version_info}")?;
+            writeln!(stdout, "ty {}", version_info.to_string().cyan())?;
         }
         HelpFormat::Json => {
             serde_json::to_writer_pretty(&mut stdout, &version_info)?;

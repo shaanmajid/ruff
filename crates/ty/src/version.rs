@@ -21,10 +21,12 @@ pub(crate) struct VersionInfo {
     ///
     /// `None` if not built from a git repo or if retrieval failed.
     commit_info: Option<CommitInfo>,
+    /// The target triple for which ty was built.
+    target_triple: String,
 }
 
 impl fmt::Display for VersionInfo {
-    /// Formatted version information: `<version>[+<commits>] (<commit> <date>)`
+    /// Formatted version information: `<version>[+<commits>] ([<commit> <date> ]<target>)`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.version)?;
 
@@ -32,7 +34,13 @@ impl fmt::Display for VersionInfo {
             if ci.commits_since_last_tag > 0 {
                 write!(f, "+{}", ci.commits_since_last_tag)?;
             }
-            write!(f, " ({} {})", ci.short_commit_hash, ci.commit_date)?;
+            write!(
+                f,
+                " ({} {} {})",
+                ci.short_commit_hash, ci.commit_date, self.target_triple
+            )?;
+        } else {
+            write!(f, " ({})", self.target_triple)?;
         }
 
         Ok(())
@@ -55,14 +63,17 @@ pub(crate) fn version() -> VersionInfo {
     }
 
     // Commit info is pulled from git and set by `build.rs`
-    let commit_info = option_env_str!("TY_COMMIT_HASH").map(|commit_hash| CommitInfo {
-        short_commit_hash: option_env_str!("TY_COMMIT_SHORT_HASH").unwrap(),
-        commit_hash,
-        commit_date: option_env_str!("TY_COMMIT_DATE").unwrap(),
-        last_tag: option_env_str!("TY_LAST_TAG"),
-        commits_since_last_tag: option_env_str!("TY_LAST_TAG_DISTANCE")
-            .as_deref()
-            .map_or(0, |value| value.parse::<u32>().unwrap_or(0)),
+    let commit_info = option_env_str!("TY_COMMIT_SHORT_HASH").and_then(|short_commit_hash| {
+        Some(CommitInfo {
+            commit_hash: option_env_str!("TY_COMMIT_HASH")
+                .unwrap_or_else(|| short_commit_hash.clone()),
+            short_commit_hash,
+            commit_date: option_env_str!("TY_COMMIT_DATE")?,
+            last_tag: option_env_str!("TY_LAST_TAG"),
+            commits_since_last_tag: option_env_str!("TY_LAST_TAG_DISTANCE")
+                .as_deref()
+                .map_or(0, |value| value.parse::<u32>().unwrap_or(0)),
+        })
     });
 
     // The version is pulled from `dist-workspace.toml` and set by `build.rs`
@@ -83,6 +94,7 @@ pub(crate) fn version() -> VersionInfo {
     VersionInfo {
         version,
         commit_info,
+        target_triple: env!("RUST_HOST_TARGET").to_string(),
     }
 }
 
@@ -97,8 +109,9 @@ mod tests {
         let version = VersionInfo {
             version: "0.0.0".to_string(),
             commit_info: None,
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
-        assert_snapshot!(version, @"0.0.0");
+        assert_snapshot!(version, @"0.0.0 (x86_64-unknown-linux-gnu)");
     }
 
     #[test]
@@ -112,8 +125,9 @@ mod tests {
                 last_tag: None,
                 commits_since_last_tag: 0,
             }),
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
-        assert_snapshot!(version, @"0.0.0 (53b0f5d92 2023-10-19)");
+        assert_snapshot!(version, @"0.0.0 (53b0f5d92 2023-10-19 x86_64-unknown-linux-gnu)");
     }
 
     #[test]
@@ -127,8 +141,9 @@ mod tests {
                 last_tag: None,
                 commits_since_last_tag: 24,
             }),
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
-        assert_snapshot!(version, @"0.0.0+24 (53b0f5d92 2023-10-19)");
+        assert_snapshot!(version, @"0.0.0+24 (53b0f5d92 2023-10-19 x86_64-unknown-linux-gnu)");
     }
 
     #[test]
@@ -142,6 +157,7 @@ mod tests {
                 last_tag: Some("v0.0.1".to_string()),
                 commits_since_last_tag: 0,
             }),
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
         assert_json_snapshot!(version);
     }

@@ -10,5 +10,6 @@ expression: version
     "commit_date": "2023-10-19",
     "last_tag": "v0.0.1",
     "commits_since_last_tag": 0
-  }
+  },
+  "target_triple": "x86_64-unknown-linux-gnu"
 }

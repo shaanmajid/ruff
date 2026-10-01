@@ -21,10 +21,12 @@ pub(crate) struct VersionInfo {
     ///
     /// `None` if not built from a git repo or if retrieval failed.
     commit_info: Option<CommitInfo>,
+    /// The target triple for which Ruff was built.
+    target_triple: String,
 }
 
 impl fmt::Display for VersionInfo {
-    /// Formatted version information: "<version>[+<commits>] (<commit> <date>)"
+    /// Formatted version information: "<version>[+<commits>] ([<commit> <date> ]<target>)"
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.version)?;
 
@@ -32,10 +34,22 @@ impl fmt::Display for VersionInfo {
             if ci.commits_since_last_tag > 0 {
                 write!(f, "+{}", ci.commits_since_last_tag)?;
             }
-            write!(f, " ({} {})", ci.short_commit_hash, ci.commit_date)?;
+            write!(
+                f,
+                " ({} {} {})",
+                ci.short_commit_hash, ci.commit_date, self.target_triple
+            )?;
+        } else {
+            write!(f, " ({})", self.target_triple)?;
         }
 
         Ok(())
+    }
+}
+
+impl From<VersionInfo> for clap::builder::Str {
+    fn from(val: VersionInfo) -> Self {
+        val.to_string().into()
     }
 }
 
@@ -52,19 +66,23 @@ pub(crate) fn version() -> VersionInfo {
     let version = option_env_str!("CARGO_PKG_VERSION").unwrap();
 
     // Commit info is pulled from git and set by `build.rs`
-    let commit_info = option_env_str!("RUFF_COMMIT_HASH").map(|commit_hash| CommitInfo {
-        short_commit_hash: option_env_str!("RUFF_COMMIT_SHORT_HASH").unwrap(),
-        commit_hash,
-        commit_date: option_env_str!("RUFF_COMMIT_DATE").unwrap(),
-        last_tag: option_env_str!("RUFF_LAST_TAG"),
-        commits_since_last_tag: option_env_str!("RUFF_LAST_TAG_DISTANCE")
-            .as_deref()
-            .map_or(0, |value| value.parse::<u32>().unwrap_or(0)),
+    let commit_info = option_env_str!("RUFF_COMMIT_SHORT_HASH").and_then(|short_commit_hash| {
+        Some(CommitInfo {
+            commit_hash: option_env_str!("RUFF_COMMIT_HASH")
+                .unwrap_or_else(|| short_commit_hash.clone()),
+            short_commit_hash,
+            commit_date: option_env_str!("RUFF_COMMIT_DATE")?,
+            last_tag: option_env_str!("RUFF_LAST_TAG"),
+            commits_since_last_tag: option_env_str!("RUFF_LAST_TAG_DISTANCE")
+                .as_deref()
+                .map_or(0, |value| value.parse::<u32>().unwrap_or(0)),
+        })
     });
 
     VersionInfo {
         version,
         commit_info,
+        target_triple: env!("RUST_HOST_TARGET").to_string(),
     }
 }
 
@@ -79,6 +97,7 @@ mod tests {
         let version = VersionInfo {
             version: "0.0.0".to_string(),
             commit_info: None,
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
         assert_snapshot!(version);
     }
@@ -94,6 +113,7 @@ mod tests {
                 commit_date: "2023-10-19".to_string(),
                 commits_since_last_tag: 0,
             }),
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
         assert_snapshot!(version);
     }
@@ -109,6 +129,7 @@ mod tests {
                 commit_date: "2023-10-19".to_string(),
                 commits_since_last_tag: 24,
             }),
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
         assert_snapshot!(version);
     }
@@ -124,6 +145,7 @@ mod tests {
                 commit_date: "2023-10-19".to_string(),
                 commits_since_last_tag: 0,
             }),
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
         assert_json_snapshot!(version);
     }

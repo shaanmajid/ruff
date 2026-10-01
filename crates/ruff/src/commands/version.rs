@@ -1,6 +1,7 @@
 use std::io::{self, BufWriter, Write};
 
 use anyhow::Result;
+use colored::Colorize;
 
 use crate::args::HelpFormat;
 
@@ -11,7 +12,7 @@ pub(crate) fn version(output_format: HelpFormat) -> Result<()> {
 
     match output_format {
         HelpFormat::Text => {
-            writeln!(stdout, "ruff {version_info}")?;
+            writeln!(stdout, "ruff {}", version_info.to_string().cyan())?;
         }
         HelpFormat::Json => {
             serde_json::to_writer_pretty(stdout, &version_info)?;

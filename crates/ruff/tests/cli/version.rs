@@ -18,6 +18,18 @@ fn version_basics() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn version_flag() -> anyhow::Result<()> {
+    let test = VersionTest::new()?;
+    let flag = test.command().arg("--version").output()?;
+    let subcommand = test.command().arg("version").output()?;
+
+    assert!(flag.status.success());
+    assert_eq!(flag.stdout, subcommand.stdout);
+    assert_eq!(flag.stderr, subcommand.stderr);
+    Ok(())
+}
+
 /// `--config` is a global option,
 /// so it's allowed to pass --config to subcommands such as `version`
 /// -- the flag is simply ignored
@@ -101,7 +113,7 @@ impl VersionTest {
         Ok(Self {
             cli_test: CliTest::with_settings(|_, mut settings| {
                 settings.add_filter(
-                    r"\d+\.\d+\.\d+(\+\d+)?( \(\w{9} \d\d\d\d-\d\d-\d\d\))?",
+                    r"\d+\.\d+\.\d+(\+\d+)?( \(\w{9} \d\d\d\d-\d\d-\d\d)? \S+\)",
                     "[VERSION]",
                 );
                 settings
